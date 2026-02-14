@@ -1,0 +1,346 @@
+"""
+FILE: preprocessing/normalizer.py
+PURPOSE: Prepare images for model inference by applying model-specific transformations
+
+RESPONSIBILITY:
+Resize images to target dimensions, apply normalization (mean/std), and convert to tensor format.
+Each recognition model (TrOCR, Paddle, Tesseract) has specific requirements.
+
+================================================================================
+DEPENDENCIES
+================================================================================
+import numpy as np
+import cv2
+from typing import Tuple, Optional, Dict
+
+pip install: opencv-python (already in requirements.txt)
+
+================================================================================
+CLASS: ImageNormalizer
+================================================================================
+
+class ImageNormalizer:
+    \"\"\"Normalize images for OCR model inference.\"\"\"
+    
+    # Model-specific normalization constants
+    IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
+    IMAGENET_STD = np.array([0.229, 0.224, 0.225])
+    
+    PADDLE_MEAN = np.array([0.5, 0.5, 0.5])
+    PADDLE_STD = np.array([0.5, 0.5, 0.5])
+    
+    def __init__(self, model_type: str = "trocr"):
+        \"\"\"
+        Args:
+            model_type: "trocr", "paddle", or "tesseract"
+        \"\"\"
+        self.model_type = model_type
+
+================================================================================
+METHODS TO IMPLEMENT
+================================================================================
+
+1. normalize(
+    image: np.ndarray,
+    target_size: Tuple[int, int],
+    maintain_aspect: bool = True
+) -> np.ndarray:
+    \"\"\"
+    Complete normalization pipeline for model.
+    
+    Args:
+        image: RGB numpy array (H, W, 3)
+        target_size: (height, width) required by model
+        maintain_aspect: If True, pad. If False, stretch.
+    
+    Returns:
+        Normalized tensor ready for inference
+        - TrOCR: (1, 3, 384, 384) float32 in [-1, 1]
+        - Paddle: (1, 3, H, W) float32 in [0, 1]
+        - Tesseract: (H, W, 3) uint8 (no normalization)
+    
+    Process:
+    1. Resize to target_size
+    2. Convert to float [0, 1]
+    3. Apply model-specific normalization
+    4. Rearrange dimensions (HWC → CHW)
+    5. Add batch dimension
+    \"\"\"
+
+2. resize_with_padding(
+    image: np.ndarray,
+    target_size: Tuple[int, int],
+    fill_value: int = 255
+) -> np.ndarray:
+    \"\"\"
+    Resize maintaining aspect ratio, pad to target size.
+    
+    Args:
+        image: Input image (H, W, 3)
+        target_size: (target_height, target_width)
+        fill_value: Padding color (default: 255 = white)
+    
+    Returns:
+        Resized and padded image (target_height, target_width, 3)
+    
+    Algorithm:
+    1. Calculate scale to fit within target_size:
+       scale = min(target_h / h, target_w / w)
+    2. Resize: new_h = int(h * scale), new_w = int(w * scale)
+    3. Create canvas filled with fill_value
+    4. Center image on canvas
+    
+    Example:
+        Input: (1000, 500, 3)
+        Target: (384, 384)
+        Scale: 0.384
+        Resized: (384, 192)
+        Padded: (384, 384) with 96px padding left/right
+    \"\"\"
+
+3. resize_with_stretch(
+    image: np.ndarray,
+    target_size: Tuple[int, int]
+) -> np.ndarray:
+    \"\"\"
+    Resize to exact target size (may distort aspect ratio).
+    
+    Args:
+        image: Input image
+        target_size: (target_height, target_width)
+    
+    Returns:
+        Resized image (target_height, target_width, 3)
+    
+    Use:
+        cv2.resize(image, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+    
+    Warning: May distort text if aspect ratios differ significantly
+    \"\"\"
+
+4. apply_normalization(
+    image: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray
+) -> np.ndarray:
+    \"\"\"
+    Apply channel-wise normalization.
+    
+    Args:
+        image: Float image [0, 1] shape (H, W, 3)
+        mean: Mean values per channel (3,)
+        std: Std values per channel (3,)
+    
+    Returns:
+        Normalized image (H, W, 3)
+    
+    Formula:
+        normalized = (image - mean) / std
+    
+    Example:
+        ImageNet normalization:
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+    \"\"\"
+
+5. to_tensor(
+    image: np.ndarray,
+    add_batch_dim: bool = True
+) -> np.ndarray:
+    \"\"\"
+    Convert to model input tensor format.
+    
+    Args:
+        image: Normalized image (H, W, 3)
+        add_batch_dim: Add batch dimension
+    
+    Returns:
+        Tensor in format expected by model
+        - (1, 3, H, W) if add_batch_dim=True
+        - (3, H, W) if add_batch_dim=False
+    
+    Process:
+    1. Transpose: (H, W, 3) → (3, H, W)
+    2. Ensure contiguous memory
+    3. Add batch dim: (3, H, W) → (1, 3, H, W)
+    \"\"\"
+
+6. get_normalization_params(self) -> Dict:
+    \"\"\"
+    Get model-specific normalization parameters.
+    
+    Returns:
+        {
+            "mean": np.ndarray,
+            "std": np.ndarray,
+            "target_size": Tuple[int, int],
+            "maintain_aspect": bool
+        }
+    
+    Model-specific params:
+    - TrOCR:
+        * target_size: (384, 384)
+        * mean: [0.485, 0.456, 0.406]
+        * std: [0.229, 0.224, 0.225]
+        * maintain_aspect: True
+    
+    - Paddle:
+        * target_size: (32, 320) for recognition
+        * mean: [0.5, 0.5, 0.5]
+        * std: [0.5, 0.5, 0.5]
+        * maintain_aspect: False (stretch)
+    
+    - Tesseract:
+        * No normalization
+        * Return original uint8
+    \"\"\"
+
+7. denormalize(
+    tensor: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray
+) -> np.ndarray:
+    \"\"\"
+    Reverse normalization (for visualization/debugging).
+    
+    Args:
+        tensor: Normalized tensor (3, H, W) or (1, 3, H, W)
+        mean: Mean used for normalization
+        std: Std used for normalization
+    
+    Returns:
+        RGB image uint8 (H, W, 3)
+    
+    Formula:
+        image = (tensor * std) + mean
+        image = np.clip(image * 255, 0, 255).astype(uint8)
+    \"\"\"
+
+================================================================================
+USAGE EXAMPLES
+================================================================================
+
+from preprocessing.normalizer import ImageNormalizer
+import cv2
+
+# Load image
+image = cv2.imread("text_crop.jpg")
+image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+# For TrOCR
+normalizer = ImageNormalizer(model_type="trocr")
+tensor = normalizer.normalize(
+    image,
+    target_size=(384, 384),
+    maintain_aspect=True
+)
+print(tensor.shape)  # (1, 3, 384, 384)
+print(tensor.min(), tensor.max())  # Approx [-2, 2] after normalization
+
+# For Paddle
+normalizer = ImageNormalizer(model_type="paddle")
+tensor = normalizer.normalize(
+    image,
+    target_size=(32, 320),
+    maintain_aspect=False  # Stretch
+)
+
+# Get params
+params = normalizer.get_normalization_params()
+print(f"Target size: {params['target_size']}")
+print(f"Mean: {params['mean']}")
+
+================================================================================
+TESTING CHECKLIST
+================================================================================
+
+1. test_resize_with_padding()
+   - Input: (1000, 500) → Target: (384, 384)
+   - Verify aspect ratio maintained
+   - Check padding added correctly
+
+2. test_resize_with_stretch()
+   - Verify exact target size achieved
+   - May distort aspect ratio
+
+3. test_normalization_imagenet()
+   - Apply ImageNet normalization
+   - Check output range approximately [-2, 2]
+
+4. test_tensor_conversion()
+   - (H, W, 3) → (1, 3, H, W)
+   - Verify dimensions correct
+
+5. test_denormalization()
+   - Normalize then denormalize
+   - Should recover original (within tolerance)
+
+6. test_model_specific_params()
+   - TrOCR: (384, 384), ImageNet stats
+   - Paddle: (32, 320), Paddle stats
+
+7. test_edge_cases()
+   - Very small image (10x10)
+   - Very large image (5000x5000)
+   - Square vs rectangular
+
+================================================================================
+IMPLEMENTATION NOTES
+================================================================================
+
+1. **Aspect Ratio Strategy**:
+   - TrOCR: Maintain aspect, pad (better quality)
+   - Paddle: Stretch (handles it internally)
+   - Choose based on model training
+
+2. **Padding Color**:
+   - Use white (255) for document images
+   - Mean color for natural images
+
+3. **Memory Layout**:
+   - Ensure contiguous: np.ascontiguousarray()
+   - Important for ONNX Runtime
+
+4. **Interpolation**:
+   - Use cv2.INTER_LINEAR for upscaling
+   - Use cv2.INTER_AREA for downscaling
+
+5. **Precision**:
+   - Use float32 (not float64) to match model
+   - Normalize AFTER converting to float
+
+================================================================================
+INTEGRATION POINTS
+================================================================================
+
+Called by:
+- core/pipeline.py (Stage 1: Preprocessing)
+- ocr/recognition/trocr_recognizer.py
+- ocr/recognition/paddle_recognizer.py
+
+Input from:
+- preprocessing/image_loader.py (RGB numpy arrays)
+- preprocessing/cropper.py (cropped regions)
+
+Output to:
+- ONNX Runtime (tensor input)
+- Model inference functions
+
+================================================================================
+PERFORMANCE CONSIDERATIONS
+================================================================================
+
+- Resize: 1-5ms depending on size
+- Normalization: <1ms (vectorized numpy)
+- Total: ~2-10ms per image
+- Batch normalization: Slightly faster per image
+
+Optimization:
+- Pre-compute mean/std arrays
+- Use OpenCV for resize (faster than PIL)
+- Vectorize operations
+
+================================================================================
+END OF DEFINITION
+================================================================================
+"""

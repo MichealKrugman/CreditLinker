@@ -1,0 +1,395 @@
+"""
+FILE: ocr/detection/base_detector.py
+PURPOSE: Abstract base class defining interface for all text detection models
+
+RESPONSIBILITY:
+Define standard interface that all detectors must implement.
+Ensures interchangeable detection engines without changing pipeline code.
+
+================================================================================
+DEPENDENCIES
+================================================================================
+from abc import ABC, abstractmethod
+import numpy as np
+from typing import List, Dict, Tuple
+from dataclasses import dataclass
+
+No external dependencies
+
+================================================================================
+DATA STRUCTURES
+================================================================================
+
+@dataclass
+class BoundingBox:
+    \"\"\"
+    Detected text region bounding box.
+    
+    Standard format used across all detectors.
+    \"\"\"
+    bbox: List[List[int]]  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] (4 corners, quadrilateral)
+    confidence: float  # 0.0 to 1.0
+    text_type: str = "line"  # "line", "word", "paragraph"
+    
+    @property
+    def as_rectangle(self) -> Tuple[int, int, int, int]:
+        \"\"\"Convert to axis-aligned rectangle: (x, y, w, h).\"\"\"
+        xs = [p[0] for p in self.bbox]
+        ys = [p[1] for p in self.bbox]
+        x, y = min(xs), min(ys)
+        w, h = max(xs) - x, max(ys) - y
+        return (x, y, w, h)
+    
+    @property
+    def area(self) -> float:
+        \"\"\"Compute bounding box area.\"\"\"
+        x, y, w, h = self.as_rectangle
+        return w * h
+    
+    def iou(self, other: 'BoundingBox') -> float:
+        \"\"\"Compute Intersection over Union with another box.\"\"\"
+        # Implementation in base class for utility
+
+================================================================================
+ABSTRACT CLASS: BaseDetector
+================================================================================
+
+class BaseDetector(ABC):
+    \"\"\"
+    Abstract base class for text detection models.
+    
+    All detector implementations MUST inherit from this and implement
+    all abstract methods.
+    \"\"\"
+    
+    def __init__(self, config: Dict):
+        \"\"\"
+        Initialize detector.
+        
+        Args:
+            config: Configuration dict with model-specific settings
+                - model_path: Path to model weights
+                - confidence_threshold: Minimum confidence to keep
+                - device: "cpu" or "cuda:0"
+        \"\"\"
+        self.config = config
+        self.model_name = "base"
+        self.confidence_threshold = config.get('confidence_threshold', 0.6)
+        self.device = config.get('device', 'cpu')
+    
+    @abstractmethod
+    def detect(self, image: np.ndarray) -> List[BoundingBox]:
+        \"\"\"
+        Detect text regions in image.
+        
+        Args:
+            image: RGB numpy array (H, W, 3)
+        
+        Returns:
+            List of BoundingBox objects
+        
+        MUST BE IMPLEMENTED by subclasses.
+        \"\"\"
+        pass
+    
+    @abstractmethod
+    def _load_model(self):
+        \"\"\"
+        Load detection model into memory.
+        
+        MUST BE IMPLEMENTED by subclasses.
+        \"\"\"
+        pass
+    
+    def post_process(
+        self,
+        raw_boxes: List[BoundingBox],
+        nms_threshold: float = 0.3
+    ) -> List[BoundingBox]:
+        \"\"\"
+        Post-process detection results.
+        
+        Args:
+            raw_boxes: Raw detections from model
+            nms_threshold: Non-maximum suppression threshold
+        
+        Returns:
+            Filtered bounding boxes
+        
+        Steps:
+        1. Filter by confidence threshold
+        2. Apply NMS (remove overlapping boxes)
+        3. Sort by position (top-to-bottom, left-to-right)
+        \"\"\"
+        # Filter confidence
+        boxes = [b for b in raw_boxes if b.confidence >= self.confidence_threshold]
+        
+        # Apply NMS
+        boxes = self._non_maximum_suppression(boxes, nms_threshold)
+        
+        # Sort spatially
+        boxes = self._sort_spatial(boxes)
+        
+        return boxes
+    
+    def _non_maximum_suppression(
+        self,
+        boxes: List[BoundingBox],
+        threshold: float
+    ) -> List[BoundingBox]:
+        \"\"\"
+        Remove overlapping boxes using NMS.
+        
+        Args:
+            boxes: Input boxes
+            threshold: IOU threshold (0.3 = keep if IOU < 30%)
+        
+        Returns:
+            Boxes after NMS
+        
+        Algorithm:
+        1. Sort boxes by confidence (descending)
+        2. For each box:
+           - Keep it
+           - Remove all boxes with IOU > threshold
+        3. Return kept boxes
+        \"\"\"
+        if not boxes:
+            return []
+        
+        # Sort by confidence
+        boxes = sorted(boxes, key=lambda b: b.confidence, reverse=True)
+        
+        kept = []
+        while boxes:
+            # Keep highest confidence box
+            best = boxes.pop(0)
+            kept.append(best)
+            
+            # Remove overlapping boxes
+            boxes = [
+                b for b in boxes
+                if best.iou(b) < threshold
+            ]
+        
+        return kept
+    
+    def _sort_spatial(self, boxes: List[BoundingBox]) -> List[BoundingBox]:
+        \"\"\"
+        Sort boxes spatially (top-to-bottom, left-to-right).
+        
+        Args:
+            boxes: Unsorted boxes
+        
+        Returns:
+            Spatially sorted boxes
+        
+        Algorithm:
+        1. Sort by Y-coordinate (top first)
+        2. For boxes in same row (similar Y), sort by X
+        \"\"\"
+        # Simple sort by top-left corner
+        boxes = sorted(boxes, key=lambda b: (
+            min(p[1] for p in b.bbox),  # Y
+            min(p[0] for p in b.bbox)   # X
+        ))
+        return boxes
+    
+    def visualize(
+        self,
+        image: np.ndarray,
+        boxes: List[BoundingBox],
+        show_confidence: bool = True
+    ) -> np.ndarray:
+        \"\"\"
+        Draw bounding boxes on image for debugging.
+        
+        Args:
+            image: Original image
+            boxes: Detected boxes
+            show_confidence: Show confidence scores
+        
+        Returns:
+            Image with boxes drawn
+        
+        Drawing:
+        - Green box: High confidence (> 0.8)
+        - Yellow box: Medium confidence (0.6-0.8)
+        - Red box: Low confidence (< 0.6)
+        \"\"\"
+        import cv2
+        
+        vis = image.copy()
+        for box in boxes:
+            # Color by confidence
+            if box.confidence > 0.8:
+                color = (0, 255, 0)  # Green
+            elif box.confidence > 0.6:
+                color = (255, 255, 0)  # Yellow
+            else:
+                color = (255, 0, 0)  # Red
+            
+            # Draw quadrilateral
+            pts = np.array(box.bbox, dtype=np.int32)
+            cv2.polylines(vis, [pts], True, color, 2)
+            
+            # Show confidence
+            if show_confidence:
+                x, y = box.bbox[0]
+                text = f"{box.confidence:.2f}"
+                cv2.putText(vis, text, (x, y-5), cv2.FONT_HERSHEY_SIMPLEX,
+                           0.5, color, 1)
+        
+        return vis
+    
+    def get_stats(self, boxes: List[BoundingBox]) -> Dict:
+        \"\"\"
+        Get statistics about detections.
+        
+        Args:
+            boxes: Detected boxes
+        
+        Returns:
+            Statistics dict
+        \"\"\"
+        if not boxes:
+            return {
+                'count': 0,
+                'avg_confidence': 0.0,
+                'min_confidence': 0.0,
+                'max_confidence': 0.0
+            }
+        
+        confidences = [b.confidence for b in boxes]
+        return {
+            'count': len(boxes),
+            'avg_confidence': sum(confidences) / len(confidences),
+            'min_confidence': min(confidences),
+            'max_confidence': max(confidences),
+            'avg_area': sum(b.area for b in boxes) / len(boxes)
+        }
+
+================================================================================
+USAGE EXAMPLE
+================================================================================
+
+from ocr.detection.base_detector import BaseDetector, BoundingBox
+
+# Subclass must implement abstract methods
+class MyDetector(BaseDetector):
+    def _load_model(self):
+        # Load model weights
+        self.model = load_my_model(self.config['model_path'])
+    
+    def detect(self, image):
+        # Run inference
+        raw_results = self.model(image)
+        
+        # Convert to BoundingBox format
+        boxes = []
+        for result in raw_results:
+            box = BoundingBox(
+                bbox=result['corners'],
+                confidence=result['score']
+            )
+            boxes.append(box)
+        
+        # Post-process
+        boxes = self.post_process(boxes)
+        return boxes
+
+# Usage
+detector = MyDetector(config={'model_path': 'model.pth', 'confidence_threshold': 0.7})
+boxes = detector.detect(image)
+
+# Visualize
+debug_img = detector.visualize(image, boxes)
+
+# Stats
+stats = detector.get_stats(boxes)
+print(f"Detected {stats['count']} regions")
+
+================================================================================
+TESTING CHECKLIST
+================================================================================
+
+1. test_bbox_rectangle_conversion()
+   - Create bbox with 4 corners
+   - Convert to (x, y, w, h)
+   - Verify correct
+
+2. test_bbox_area()
+   - Compute area
+   - Verify against manual calculation
+
+3. test_bbox_iou()
+   - Two overlapping boxes
+   - Compute IOU
+   - Verify in [0, 1]
+
+4. test_confidence_filtering()
+   - Boxes with various confidences
+   - Filter by threshold
+   - Verify only high-confidence kept
+
+5. test_nms()
+   - Overlapping boxes
+   - Apply NMS
+   - Verify duplicates removed
+
+6. test_spatial_sorting()
+   - Boxes at various positions
+   - Sort spatially
+   - Verify top-to-bottom, left-to-right
+
+7. test_visualization()
+   - Draw boxes on image
+   - Verify no crashes
+   - Check color coding
+
+8. test_stats()
+   - Compute stats
+   - Verify averages correct
+
+================================================================================
+IMPLEMENTATION NOTES
+================================================================================
+
+1. **BoundingBox Format**:
+   - Always use 4-corner quadrilateral
+   - Clockwise from top-left: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+   - Allows rotated boxes
+
+2. **IOU Computation**:
+   - For quadrilaterals, convert to rectangles first (conservative)
+   - Or use Shapely for accurate polygon IOU
+
+3. **NMS Threshold**:
+   - 0.3 = remove boxes with >30% overlap (standard)
+   - Lower = more aggressive (fewer duplicates)
+   - Higher = less aggressive (may keep duplicates)
+
+4. **Confidence Threshold**:
+   - 0.6 = reasonable default
+   - Tune based on precision/recall trade-off
+   - Lower = more detections (higher recall, lower precision)
+
+================================================================================
+INTEGRATION POINTS
+================================================================================
+
+Subclassed by:
+- ocr/detection/paddle_detector.py
+- (Future: dbnet_detector.py, east_detector.py)
+
+Used by:
+- core/pipeline.py (Stage 2: Detection)
+- ocr/factory.py (creates instances)
+
+Output to:
+- preprocessing/cropper.py (receives BoundingBox list)
+
+================================================================================
+END OF DEFINITION
+================================================================================
+"""

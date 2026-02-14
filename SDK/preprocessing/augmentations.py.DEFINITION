@@ -1,0 +1,432 @@
+"""
+FILE: preprocessing/augmentations.py
+PURPOSE: Image quality enhancement for improved OCR accuracy on degraded documents
+
+RESPONSIBILITY:
+Assess image quality and apply appropriate enhancements (denoising, contrast, deskew).
+Only apply when needed - augmentation can worsen good-quality images.
+
+================================================================================
+DEPENDENCIES
+================================================================================
+import numpy as np
+import cv2
+from typing import Dict, Optional
+from dataclasses import dataclass
+
+pip install: opencv-python, scikit-image (optional for advanced methods)
+
+================================================================================
+DATA STRUCTURES
+================================================================================
+
+@dataclass
+class ImageQuality:
+    \"\"\"Image quality assessment metrics.\"\"\"
+    blur_score: float  # 0-1, higher = sharper
+    contrast_score: float  # 0-1, higher = better contrast
+    brightness: float  # 0-255, avg pixel value
+    skew_angle: float  # degrees, rotation from horizontal
+    noise_level: float  # 0-1, higher = more noise
+    overall_quality: float  # 0-1, composite score
+    
+    def needs_enhancement(self) -> bool:
+        \"\"\"Check if image needs quality enhancement.\"\"\"
+        return (
+            self.blur_score < 0.5 or
+            self.contrast_score < 0.3 or
+            abs(self.skew_angle) > 2.0 or
+            self.noise_level > 0.3
+        )
+
+================================================================================
+CLASS: ImageAugmenter
+================================================================================
+
+class ImageAugmenter:
+    \"\"\"Enhance image quality for OCR.\"\"\"
+    
+    def __init__(self):
+        pass
+
+================================================================================
+METHODS TO IMPLEMENT
+================================================================================
+
+1. assess_quality(image: np.ndarray) -> ImageQuality:
+    \"\"\"
+    Evaluate image quality metrics.
+    
+    Args:
+        image: RGB or grayscale numpy array
+    
+    Returns:
+        ImageQuality with all metrics
+    
+    Metrics:
+    - blur_score: Laplacian variance (higher = sharper)
+    - contrast_score: RMS contrast
+    - brightness: Mean pixel value
+    - skew_angle: Rotation from horizontal
+    - noise_level: Estimated noise
+    - overall_quality: Weighted average
+    
+    Algorithm:
+    1. Convert to grayscale if RGB
+    2. Compute each metric
+    3. Normalize to [0, 1]
+    4. Compute weighted average for overall
+    \"\"\"
+
+2. enhance_auto(image: np.ndarray) -> np.ndarray:
+    \"\"\"
+    Automatically enhance based on quality assessment.
+    
+    Args:
+        image: Input image
+    
+    Returns:
+        Enhanced image
+    
+    Process:
+    1. Assess quality
+    2. If quality < threshold:
+       - If blurry: skip (can't fix blur)
+       - If low contrast: enhance_contrast()
+       - If noisy: denoise()
+       - If skewed: deskew()
+    3. Return enhanced image
+    \"\"\"
+
+3. denoise(
+    image: np.ndarray,
+    method: str = "bilateral"
+) -> np.ndarray:
+    \"\"\"
+    Remove noise while preserving edges.
+    
+    Args:
+        image: Noisy image
+        method: "bilateral", "gaussian", "nlm" (non-local means)
+    
+    Returns:
+        Denoised image
+    
+    Methods:
+    - bilateral: Good edge preservation, fast
+      cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
+    
+    - gaussian: Simple, very fast
+      cv2.GaussianBlur(image, (5, 5), 0)
+    
+    - nlm: Best quality, slow
+      cv2.fastNlMeansDenoising(image, h=10)
+    \"\"\"
+
+4. enhance_contrast(
+    image: np.ndarray,
+    method: str = "clahe"
+) -> np.ndarray:
+    \"\"\"
+    Improve contrast for better text visibility.
+    
+    Args:
+        image: Low-contrast image
+        method: "clahe", "histogram_eq", "gamma"
+    
+    Returns:
+        Contrast-enhanced image
+    
+    Methods:
+    - clahe: Adaptive histogram equalization (best for documents)
+      clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+      clahe.apply(gray)
+    
+    - histogram_eq: Global histogram equalization
+      cv2.equalizeHist(gray)
+    
+    - gamma: Gamma correction (for very dark/bright images)
+      Gamma < 1: brighten
+      Gamma > 1: darken
+    \"\"\"
+
+5. binarize(
+    image: np.ndarray,
+    method: str = "adaptive"
+) -> np.ndarray:
+    \"\"\"
+    Convert to binary (black text on white background).
+    
+    Args:
+        image: Grayscale image
+        method: "otsu", "adaptive", "sauvola"
+    
+    Returns:
+        Binary image (0 or 255)
+    
+    Methods:
+    - otsu: Global threshold, good for uniform lighting
+      _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    - adaptive: Local threshold, handles varying lighting
+      cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                            cv2.THRESH_BINARY, 11, 2)
+    
+    - sauvola: Best for degraded documents (requires scikit-image)
+      from skimage.filters import threshold_sauvola
+    \"\"\"
+
+6. deskew(image: np.ndarray) -> np.ndarray:
+    \"\"\"
+    Correct rotation to make text horizontal.
+    
+    Args:
+        image: Skewed image
+    
+    Returns:
+        Deskewed image
+    
+    Algorithm:
+    1. Detect text orientation:
+       - Apply edge detection
+       - Use Hough line transform to find dominant angle
+       - Or use projection profile
+    2. Rotate by negative of detected angle
+    3. Crop to remove black borders
+    
+    Example:
+        angle = _detect_skew_angle(image)
+        if abs(angle) > 0.5:  # Only if significant
+            image = _rotate_image(image, -angle)
+    \"\"\"
+
+7. remove_shadows(image: np.ndarray) -> np.ndarray:
+    \"\"\"
+    Normalize lighting and remove shadows.
+    
+    Args:
+        image: Image with shadows/uneven lighting
+    
+    Returns:
+        Shadow-removed image
+    
+    Algorithm:
+    1. Convert to grayscale
+    2. Apply morphological opening with large kernel
+       to estimate background
+    3. Subtract background from original
+    4. Normalize
+    
+    Example:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (50, 50))
+        background = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
+        normalized = cv2.subtract(gray, background)
+    \"\"\"
+
+8. _detect_skew_angle(image: np.ndarray) -> float:
+    \"\"\"
+    Detect document rotation angle.
+    
+    Args:
+        image: Document image
+    
+    Returns:
+        Skew angle in degrees (+ = clockwise, - = counter-clockwise)
+    
+    Method 1: Hough Lines
+    1. Edge detection (Canny)
+    2. Probabilistic Hough Line Transform
+    3. Get angles of detected lines
+    4. Return median angle
+    
+    Method 2: Projection Profile
+    1. Sum pixels horizontally for each angle
+    2. Angle with maximum variance = correct orientation
+    \"\"\"
+
+9. _compute_blur_score(image: np.ndarray) -> float:
+    \"\"\"
+    Compute blur metric using Laplacian variance.
+    
+    Args:
+        image: Grayscale image
+    
+    Returns:
+        Blur score (higher = sharper)
+    
+    Algorithm:
+        laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+        score = laplacian.var()
+    
+    Interpretation:
+        > 500: Sharp
+        100-500: Acceptable
+        < 100: Blurry (may need rescanning)
+    \"\"\"
+
+10. _compute_contrast_score(image: np.ndarray) -> float:
+    \"\"\"
+    Compute RMS contrast.
+    
+    Args:
+        image: Grayscale image
+    
+    Returns:
+        Contrast score [0, 1]
+    
+    Formula:
+        rms_contrast = std_dev(pixels) / mean(pixels)
+        normalized = rms_contrast / max_possible_rms
+    \"\"\"
+
+================================================================================
+USAGE EXAMPLES
+================================================================================
+
+from preprocessing.augmentations import ImageAugmenter
+import cv2
+
+augmenter = ImageAugmenter()
+
+# Load degraded image
+image = cv2.imread("poor_quality.jpg")
+image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+# Assess quality
+quality = augmenter.assess_quality(image)
+print(f"Blur: {quality.blur_score:.2f}")
+print(f"Contrast: {quality.contrast_score:.2f}")
+print(f"Skew: {quality.skew_angle:.1f}°")
+
+# Auto-enhance
+if quality.needs_enhancement():
+    enhanced = augmenter.enhance_auto(image)
+else:
+    enhanced = image
+
+# Manual enhancement
+if quality.contrast_score < 0.3:
+    enhanced = augmenter.enhance_contrast(enhanced, method="clahe")
+
+if quality.noise_level > 0.3:
+    enhanced = augmenter.denoise(enhanced, method="bilateral")
+
+if abs(quality.skew_angle) > 2.0:
+    enhanced = augmenter.deskew(enhanced)
+
+# For very poor quality: binarize
+if quality.overall_quality < 0.3:
+    gray = cv2.cvtColor(enhanced, cv2.COLOR_RGB2GRAY)
+    binary = augmenter.binarize(gray, method="adaptive")
+
+================================================================================
+TESTING CHECKLIST
+================================================================================
+
+1. test_quality_assessment()
+   - Good quality image → high scores
+   - Blurry image → low blur_score
+   - Low contrast → low contrast_score
+
+2. test_denoise()
+   - Add Gaussian noise
+   - Apply denoise
+   - Verify noise reduced (SNR improved)
+
+3. test_contrast_enhancement()
+   - Low contrast image
+   - Apply CLAHE
+   - Verify contrast improved
+
+4. test_binarization()
+   - Grayscale with text
+   - Apply Otsu/adaptive
+   - Verify binary output (only 0 and 255)
+
+5. test_deskew()
+   - Rotate image 5 degrees
+   - Apply deskew
+   - Verify angle corrected (± 1 degree)
+
+6. test_shadow_removal()
+   - Image with uneven lighting
+   - Apply shadow removal
+   - Verify more uniform brightness
+
+7. test_auto_enhance()
+   - Various quality images
+   - Verify appropriate enhancements applied
+
+8. test_no_enhancement_on_good_image()
+   - High quality image
+   - Verify not modified (or minimally)
+
+================================================================================
+IMPLEMENTATION NOTES
+================================================================================
+
+1. **When to Apply**:
+   - Only on poor quality images
+   - Can worsen good images
+   - Use quality thresholds
+
+2. **Order of Operations**:
+   - Deskew first (affects everything else)
+   - Denoise second
+   - Contrast enhancement third
+   - Binarization last (optional, destructive)
+
+3. **Parameter Tuning**:
+   - CLAHE clipLimit: 2.0 (standard), 3.0 (aggressive)
+   - Bilateral d=9 (good quality/speed trade-off)
+   - Adaptive threshold blockSize=11 (odd number, adjust for text size)
+
+4. **Edge Cases**:
+   - Very dark images: Try gamma correction first
+   - Color documents: Convert to grayscale first
+   - Handwritten text: Be conservative (less aggressive enhancement)
+
+5. **Performance**:
+   - CLAHE: ~10ms
+   - Bilateral filter: ~50ms
+   - NLM denoising: ~500ms (very slow)
+   - Deskew: ~100ms
+   - Use faster methods for real-time processing
+
+================================================================================
+INTEGRATION POINTS
+================================================================================
+
+Called by:
+- core/pipeline.py (optional preprocessing step)
+- preprocessing/image_loader.py (quality assessment)
+
+Optional in pipeline:
+- Can be skipped if images are high quality
+- Config flag: apply_augmentations
+
+Decision flow:
+1. Load image
+2. Assess quality
+3. If quality.needs_enhancement():
+     Apply augmentations
+4. Proceed to normalization
+
+================================================================================
+PERFORMANCE CONSIDERATIONS
+================================================================================
+
+Quality assessment: ~20ms
+Auto enhancement (if needed): 50-200ms depending on methods
+Full pipeline with all enhancements: ~300ms
+
+Recommendation:
+- Assess quality for all images
+- Only enhance when needed
+- Skip for high-quality scans
+- Use faster methods (bilateral, CLAHE) over slow ones (NLM)
+
+================================================================================
+END OF DEFINITION
+================================================================================
+"""
