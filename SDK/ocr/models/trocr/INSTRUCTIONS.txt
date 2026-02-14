@@ -1,0 +1,201 @@
+"""
+TROCR ONNX MODELS - INSTALLATION INSTRUCTIONS
+===============================================
+
+REQUIRED FILES:
+---------------
+This directory must contain the following files for TrOCR to work:
+
+1. encoder.onnx       - Vision encoder model
+2. decoder.onnx       - Text decoder model
+3. vocab.json         - BPE vocabulary mapping
+4. merges.txt         - BPE merge operations
+
+CURRENT STATUS:
+---------------
+[ ] encoder.onnx (MISSING - ~250MB)
+[ ] decoder.onnx (MISSING - ~300MB)
+[ ] vocab.json (MISSING - ~1MB)
+[ ] merges.txt (MISSING - ~500KB)
+
+Total size: ~550MB
+
+HOW TO OBTAIN THESE FILES:
+---------------------------
+
+OPTION 1: Download Pre-Converted ONNX Models (RECOMMENDED)
+------------------------------------------------------------
+If you have access to pre-converted TrOCR ONNX models:
+
+1. Download the 4 files from your model repository
+2. Place them in this directory: SDK/ocr/models/trocr/
+3. Verify file names match exactly (case-sensitive)
+
+Expected file sizes (approximate):
+- encoder.onnx: 250-300MB
+- decoder.onnx: 300-350MB
+- vocab.json: ~1MB
+- merges.txt: ~500KB
+
+OPTION 2: Convert from Hugging Face Model (ADVANCED)
+-----------------------------------------------------
+If you need to convert the PyTorch model to ONNX yourself:
+
+1. Install required packages:
+   ```bash
+   pip install transformers torch onnx onnxruntime
+   ```
+
+2. Run conversion script:
+   ```python
+   from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+   import torch
+
+   # Load TrOCR model from Hugging Face
+   model_name = "microsoft/trocr-base-handwritten"  # or trocr-large-printed
+   model = VisionEncoderDecoderModel.from_pretrained(model_name)
+   processor = TrOCRProcessor.from_pretrained(model_name)
+
+   # Export encoder to ONNX
+   encoder = model.get_encoder()
+   dummy_input = torch.randn(1, 3, 384, 384)  # Batch, Channels, Height, Width
+   torch.onnx.export(
+       encoder,
+       dummy_input,
+       "encoder.onnx",
+       input_names=["pixel_values"],
+       output_names=["last_hidden_state"],
+       dynamic_axes={
+           "pixel_values": {0: "batch_size"},
+           "last_hidden_state": {0: "batch_size"}
+       },
+       opset_version=14
+   )
+
+   # Export decoder to ONNX
+   decoder = model.get_decoder()
+   encoder_hidden_states = torch.randn(1, 577, 768)  # Encoder output shape
+   decoder_input_ids = torch.tensor([[0]])  # BOS token
+   torch.onnx.export(
+       decoder,
+       (decoder_input_ids, encoder_hidden_states),
+       "decoder.onnx",
+       input_names=["input_ids", "encoder_hidden_states"],
+       output_names=["logits"],
+       dynamic_axes={
+           "input_ids": {0: "batch_size", 1: "sequence"},
+           "encoder_hidden_states": {0: "batch_size"},
+           "logits": {0: "batch_size", 1: "sequence"}
+       },
+       opset_version=14
+   )
+
+   # Save tokenizer files
+   tokenizer = processor.tokenizer
+   tokenizer.save_vocabulary(".")  # Saves vocab.json and merges.txt
+   ```
+
+3. Verify ONNX models work:
+   ```python
+   import onnxruntime as ort
+   import numpy as np
+
+   # Test encoder
+   encoder_session = ort.InferenceSession("encoder.onnx")
+   test_input = np.random.randn(1, 3, 384, 384).astype(np.float32)
+   encoder_output = encoder_session.run(None, {"pixel_values": test_input})
+   print(f"Encoder output shape: {encoder_output[0].shape}")  # Should be (1, 577, 768)
+
+   # Test decoder
+   decoder_session = ort.InferenceSession("decoder.onnx")
+   decoder_input = np.array([[0]], dtype=np.int64)  # BOS token
+   decoder_output = decoder_session.run(
+       None,
+       {
+           "input_ids": decoder_input,
+           "encoder_hidden_states": encoder_output[0]
+       }
+   )
+   print(f"Decoder output shape: {decoder_output[0].shape}")  # Should be (1, 1, vocab_size)
+   ```
+
+OPTION 3: Use Alternative TrOCR Variant
+----------------------------------------
+Different TrOCR variants for different use cases:
+
+1. trocr-base-handwritten (Best for scanned handwritten text)
+   - Model: microsoft/trocr-base-handwritten
+   - Size: ~300MB (encoder) + ~300MB (decoder)
+   - Use case: Handwritten bank statements
+
+2. trocr-large-printed (Best for printed text - RECOMMENDED)
+   - Model: microsoft/trocr-large-printed
+   - Size: ~400MB (encoder) + ~400MB (decoder)
+   - Use case: Printed financial documents
+   - Higher accuracy for printed text
+
+3. trocr-base-printed (Smaller, faster)
+   - Model: microsoft/trocr-base-printed
+   - Size: ~250MB (encoder) + ~250MB (decoder)
+   - Use case: Fast inference, good accuracy
+
+VERIFICATION:
+-------------
+After placing files, verify they load correctly:
+
+```bash
+cd SDK/
+python -c "
+from ocr.recognition.trocr_recognizer import TrOCRRecognizer
+
+recognizer = TrOCRRecognizer(
+    encoder_path='ocr/models/trocr/encoder.onnx',
+    decoder_path='ocr/models/trocr/decoder.onnx',
+    vocab_path='ocr/models/trocr/vocab.json',
+    merges_path='ocr/models/trocr/merges.txt'
+)
+print('TrOCR models loaded successfully!')
+"
+```
+
+TROUBLESHOOTING:
+----------------
+
+Error: "No such file or directory: encoder.onnx"
+→ Files not in correct location. Check path.
+
+Error: "ONNX model version mismatch"
+→ Regenerate ONNX with opset_version=14 or update onnxruntime
+
+Error: "Input shape mismatch"
+→ Ensure encoder input is (1, 3, 384, 384)
+
+Error: "Vocab file not found"
+→ Ensure vocab.json and merges.txt are in same directory
+
+PRODUCTION DEPLOYMENT:
+----------------------
+For production, consider:
+
+1. Model Quantization (Reduce size, increase speed):
+   ```bash
+   python -m onnxruntime.quantization.quantize_dynamic \
+       encoder.onnx encoder_quantized.onnx
+   ```
+
+2. GPU Acceleration:
+   - Install: pip install onnxruntime-gpu
+   - Use CUDAExecutionProvider in recognizer
+
+3. Model Caching:
+   - Load models once at startup
+   - Reuse across multiple requests
+   - Use orchestrator for model lifecycle
+
+NEED HELP?
+----------
+If you need pre-converted ONNX models or have issues:
+1. Check Hugging Face model hub: https://huggingface.co/microsoft/trocr-base-printed
+2. Check ONNX Model Zoo
+3. Contact your team's ML engineer for pre-converted models
+"""

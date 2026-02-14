@@ -1,0 +1,308 @@
+"""
+CORE/ORCHESTRATOR.PY - DEFINITION
+
+PURPOSE:
+Runtime dependency injection and execution manager.
+Decides WHICH engines to use and HOW to execute them.
+Prevents pipeline from being hardcoded to specific models.
+
+---
+
+CLASS: Orchestrator
+-------------------
+
+INITIALIZATION:
+def __init__(self, config: Config):
+    self.config = config
+    self.detector_registry = {}
+    self.recognizer_registry = {}
+    self.loaded_models = {}
+    
+---
+
+CORE METHODS:
+
+1. REGISTRATION:
+def register_detector(self, name: str, detector_class):
+    """
+    Register a detection model class.
+    
+    Example:
+        orchestrator.register_detector("paddle", PaddleDetector)
+        orchestrator.register_detector("dbnet", DBNetDetector)
+    """
+
+def register_recognizer(self, name: str, recognizer_class):
+    """
+    Register a recognition model class.
+    
+    Example:
+        orchestrator.register_recognizer("trocr", TrOCRRecognizer)
+        orchestrator.register_recognizer("paddle", PaddleRecognizer)
+        orchestrator.register_recognizer("tesseract", TesseractRecognizer)
+    """
+
+---
+
+2. MODEL SELECTION:
+def get_detector(self, name: str = None) -> BaseDetector:
+    """
+    Get or create detector instance.
+    
+    Logic:
+    - If name is None, use config.default_detector
+    - Check if already loaded in cache
+    - If not loaded:
+        * Get class from registry
+        * Instantiate with config
+        * Cache instance
+        * Return instance
+    
+    Lazy Loading: Models only loaded when requested
+    """
+
+def get_recognizer(self, name: str = None) -> BaseRecognizer:
+    """
+    Get or create recognizer instance.
+    
+    Logic: Same as get_detector
+    """
+
+---
+
+3. FALLBACK CHAIN:
+def set_fallback_chain(self, recognizers: List[str]):
+    """
+    Set fallback sequence for recognition.
+    
+    Example:
+        orchestrator.set_fallback_chain(["trocr", "paddle", "tesseract"])
+    
+    Behavior:
+    - Try TrOCR first
+    - If fails (low confidence or error), try Paddle
+    - If still fails, try Tesseract
+    """
+
+def recognize_with_fallback(self, image_crop: np.ndarray) -> RecognitionResult:
+    """
+    Attempt recognition with fallback chain.
+    
+    Algorithm:
+    1. For each recognizer in fallback chain:
+        a. Try recognition
+        b. Check if confidence > threshold
+        c. If yes, return result
+        d. If no, try next recognizer
+    2. If all fail, return best result (highest confidence)
+    
+    Logging:
+    - Log which recognizer succeeded
+    - Log why each recognizer failed (error or low confidence)
+    """
+
+---
+
+4. BATCH PROCESSING:
+def process_batch(self, images: List[np.ndarray]) -> List[LedgerDocument]:
+    """
+    Process multiple documents efficiently.
+    
+    Strategy:
+    - Group images into batches of size config.batch_size
+    - Process each batch through pipeline
+    - Collect results
+    - Return all results
+    
+    Resource Management:
+    - Monitor GPU memory
+    - Adjust batch size if needed
+    - Free memory between batches
+    """
+
+---
+
+5. ASYNC EXECUTION:
+async def process_async(self, image: np.ndarray) -> LedgerDocument:
+    """
+    Asynchronous processing for concurrent requests.
+    
+    Use Cases:
+    - Multiple API requests
+    - Background job processing
+    - Real-time streaming
+    """
+
+---
+
+6. PIPELINE EXECUTION:
+def execute(self, image: np.ndarray, detector_name: str = None, recognizer_name: str = None) -> LedgerDocument:
+    """
+    Main execution method.
+    
+    Args:
+        image: Input image
+        detector_name: Override default detector
+        recognizer_name: Override default recognizer
+    
+    Flow:
+    1. Get detector (specified or default)
+    2. Get recognizer (specified or default)
+    3. Create pipeline with detector + recognizer
+    4. Run pipeline
+    5. Return result
+    
+    Example:
+        # Use defaults from config
+        result = orchestrator.execute(image)
+        
+        # Override recognizer
+        result = orchestrator.execute(image, recognizer_name="tesseract")
+    """
+
+---
+
+RESOURCE MANAGEMENT:
+
+def preload_models(self):
+    """
+    Load all registered models at startup.
+    
+    Benefits:
+    - Faster first request (no loading delay)
+    - Detect model errors early
+    
+    Trade-off:
+    - Higher memory usage
+    - Longer startup time
+    """
+
+def unload_model(self, model_name: str):
+    """
+    Unload model from memory.
+    
+    Use Cases:
+    - Free GPU memory
+    - Switch between models
+    - Handle OOM errors
+    """
+
+def get_memory_usage(self) -> dict:
+    """
+    Report current memory usage.
+    
+    Returns:
+        {
+            "gpu_memory_mb": float,
+            "cpu_memory_mb": float,
+            "loaded_models": List[str]
+        }
+    """
+
+---
+
+CONFIGURATION INJECTION:
+
+Models receive config at instantiation:
+
+detector = PaddleDetector(
+    config={
+        "model_path": config.paddle_det_path,
+        "threshold": config.detection_threshold,
+        "device": config.device
+    }
+)
+
+This ensures:
+- All models use consistent settings
+- Easy to change behavior via config
+- No hardcoded values in model code
+
+---
+
+A/B TESTING SUPPORT:
+
+def compare_recognizers(self, image_crop: np.ndarray, recognizers: List[str]) -> dict:
+    """
+    Run multiple recognizers and compare results.
+    
+    Returns:
+        {
+            "trocr": RecognitionResult,
+            "paddle": RecognitionResult,
+            "tesseract": RecognitionResult,
+            "best": "trocr",
+            "agreement": 0.87  # Similarity between results
+        }
+    
+    Use Cases:
+    - Evaluate recognizer performance
+    - Choose best model for specific data
+    - Collect training data for model selection
+    """
+
+---
+
+ERROR HANDLING:
+
+try:
+    detector = self.get_detector("paddle")
+except ModelLoadError:
+    logger.error("PaddleDetector failed to load, falling back to default")
+    detector = self.get_detector(config.default_detector)
+
+try:
+    result = recognizer.recognize(crop)
+except RecognitionError:
+    logger.warning("Primary recognizer failed, using fallback")
+    result = self.recognize_with_fallback(crop)
+
+---
+
+USAGE EXAMPLE:
+
+# Initialize
+config = Config.load("config.yaml")
+orchestrator = Orchestrator(config)
+
+# Register models
+orchestrator.register_detector("paddle", PaddleDetector)
+orchestrator.register_recognizer("trocr", TrOCRRecognizer)
+orchestrator.register_recognizer("paddle", PaddleRecognizer)
+orchestrator.register_recognizer("tesseract", TesseractRecognizer)
+
+# Set fallback chain
+orchestrator.set_fallback_chain(["trocr", "paddle", "tesseract"])
+
+# Preload models for faster inference
+orchestrator.preload_models()
+
+# Execute extraction
+image = cv2.imread("statement.jpg")
+result = orchestrator.execute(image)
+
+# Or with specific models
+result = orchestrator.execute(
+    image,
+    detector_name="paddle",
+    recognizer_name="trocr"
+)
+
+---
+
+MULTI-TENANCY SUPPORT:
+
+def create_tenant_orchestrator(self, tenant_id: str) -> Orchestrator:
+    """
+    Create isolated orchestrator for specific tenant.
+    
+    Use Cases:
+    - Different customers use different models
+    - Customer-specific configurations
+    - Isolated resource limits
+    
+    Example:
+        tenant_orch = orchestrator.create_tenant_orchestrator("customer_123")
+        tenant_orch.config.recognizer = "tesseract"  # Customer prefers Tesseract
+    """
+"""

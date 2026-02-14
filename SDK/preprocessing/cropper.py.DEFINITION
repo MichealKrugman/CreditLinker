@@ -1,0 +1,449 @@
+"""
+FILE: preprocessing/cropper.py
+PURPOSE: Extract text regions from images based on detection bounding boxes
+
+RESPONSIBILITY:
+Given an image and bounding boxes from detection, extract individual text line images.
+Maintain spatial ordering (top-to-bottom, left-to-right) critical for transaction sequence.
+
+================================================================================
+DEPENDENCIES
+================================================================================
+import numpy as np
+import cv2
+from typing import List, Dict, Tuple
+from dataclasses import dataclass
+
+No external pip packages needed (uses opencv from image_loader)
+
+================================================================================
+DATA STRUCTURES
+================================================================================
+
+@dataclass
+class BoundingBox:
+    \"\"\"Bounding box for detected text region.\"\"\"
+    bbox: List[List[int]]  # [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] (4 corners)
+    confidence: float      # 0.0 to 1.0
+    region_id: int = 0     # Assigned after sorting
+    
+    @property
+    def center_y(self) -> float:
+        \"\"\"Y-coordinate of box center (for vertical sorting).\"\"\"
+        return sum(point[1] for point in self.bbox) / 4
+    
+    @property
+    def center_x(self) -> float:
+        \"\"\"X-coordinate of box center (for horizontal sorting).\"\"\"
+        return sum(point[0] for point in self.bbox) / 4
+    
+    @property
+    def min_x(self) -> int:
+        return min(point[0] for point in self.bbox)
+    
+    @property
+    def min_y(self) -> int:
+        return min(point[1] for point in self.bbox)
+    
+    @property
+    def max_x(self) -> int:
+        return max(point[0] for point in self.bbox)
+    
+    @property
+    def max_y(self) -> int:
+        return max(point[1] for point in self.bbox)
+
+================================================================================
+CLASS: ImageCropper
+================================================================================
+
+class ImageCropper:
+    \"\"\"Extract and sort text regions from images.\"\"\"
+    
+    def __init__(self, padding: int = 3, min_size: int = 10):
+        \"\"\"
+        Args:
+            padding: Pixels to add around each crop (default: 3)
+            min_size: Minimum crop size in pixels (default: 10)
+        \"\"\"
+        self.padding = padding
+        self.min_size = min_size
+
+================================================================================
+METHODS TO IMPLEMENT
+================================================================================
+
+1. extract_regions(
+    image: np.ndarray,
+    bboxes: List[BoundingBox]
+) -> List[Dict]:
+    \"\"\"
+    Extract all text regions from image.
+    
+    Args:
+        image: RGB numpy array (H, W, 3)
+        bboxes: List of bounding boxes from detector
+    
+    Returns:
+        List of dicts:
+        [
+            {
+                "crop": np.ndarray,      # Cropped image (h, w, 3)
+                "bbox": BoundingBox,     # Original bbox
+                "region_id": int,        # Sorted order (0, 1, 2...)
+                "position": {
+                    "row": int,          # Which row (0, 1, 2...)
+                    "col": int           # Which column in row
+                }
+            },
+            ...
+        ]
+    
+    Process:
+    1. Filter small/invalid boxes
+    2. Sort spatially (top-to-bottom, left-to-right)
+    3. For each box:
+       - Add padding
+       - Extract crop
+       - Assign row/column position
+    4. Return list of crops with metadata
+    
+    CRITICAL: Order determines transaction sequence!
+    \"\"\"
+
+2. sort_spatial(bboxes: List[BoundingBox]) -> List[BoundingBox]:
+    \"\"\"
+    Sort boxes spatially: top-to-bottom, then left-to-right within rows.
+    
+    Args:
+        bboxes: Unsorted bounding boxes
+    
+    Returns:
+        Sorted bounding boxes with region_id assigned
+    
+    Algorithm:
+    1. Group boxes into rows (boxes with similar Y-coordinates)
+       - Threshold: ±10 pixels = same row
+    2. Sort rows by Y-coordinate (top first)
+    3. Within each row, sort boxes by X-coordinate (left first)
+    4. Assign sequential region_id: 0, 1, 2, ...
+    
+    Example:
+        Input: Boxes at Y=100, Y=50, Y=105, Y=55
+        Groups: Row 1 (Y≈50): [box2, box4]
+                Row 2 (Y≈100): [box1, box3]
+        Sorted: [box2, box4, box1, box3]  (top row first, left-to-right)
+    \"\"\"
+
+3. _group_into_rows(
+    bboxes: List[BoundingBox],
+    row_threshold: int = 10
+) -> List[List[BoundingBox]]:
+    \"\"\"
+    Group bounding boxes into rows.
+    
+    Args:
+        bboxes: List of bounding boxes
+        row_threshold: Max Y-difference for same row (default: 10 pixels)
+    
+    Returns:
+        List of rows, each row is list of boxes
+    
+    Algorithm:
+    1. Start with first box as row 1
+    2. For each remaining box:
+       - Find row where |box.center_y - row_avg_y| < threshold
+       - If found: add to that row
+       - If not: create new row
+    3. Sort rows by average Y-coordinate
+    
+    Example:
+        Boxes: [y=100, y=105, y=200, y=202]
+        Rows: [[y=100, y=105], [y=200, y=202]]
+    \"\"\"
+
+4. _assign_row_column_positions(
+    sorted_bboxes: List[BoundingBox]
+) -> List[BoundingBox]:
+    \"\"\"
+    Assign row and column indices to sorted boxes.
+    
+    Args:
+        sorted_bboxes: Already spatially sorted boxes
+    
+    Returns:
+        Boxes with position metadata added
+    
+    Process:
+    - Track current row number
+    - When Y-coordinate jumps significantly → new row
+    - Column = index within current row
+    
+    Adds attributes:
+    - bbox.row_num: 0, 1, 2...
+    - bbox.col_num: 0, 1, 2... (resets each row)
+    \"\"\"
+
+5. crop_box(
+    image: np.ndarray,
+    bbox: BoundingBox,
+    padding: int
+) -> np.ndarray:
+    \"\"\"
+    Extract cropped region from image.
+    
+    Args:
+        image: Full image
+        bbox: Bounding box (4 corners)
+        padding: Pixels to add around crop
+    
+    Returns:
+        Cropped image with padding
+    
+    Process:
+    1. Get bounding rectangle from 4 corners
+    2. Expand by padding pixels
+    3. Clip to image boundaries
+    4. Extract crop: image[y1:y2, x1:x2]
+    5. Return cropped region
+    
+    Handle edge cases:
+    - Box extends beyond image → clip to bounds
+    - Box too small after padding → skip
+    \"\"\"
+
+6. filter_invalid_boxes(
+    bboxes: List[BoundingBox]
+) -> List[BoundingBox]:
+    \"\"\"
+    Remove invalid or too-small boxes.
+    
+    Args:
+        bboxes: Raw bounding boxes
+    
+    Returns:
+        Filtered bounding boxes
+    
+    Filters:
+    - Width or height < min_size
+    - Extreme aspect ratios (> 20:1 or < 1:20)
+    - Boxes entirely outside image bounds
+    - Duplicate boxes (IOU > 0.95)
+    
+    Aspect ratio check:
+    width = max_x - min_x
+    height = max_y - min_y
+    ratio = width / height
+    if ratio > 20 or ratio < 0.05: remove
+    \"\"\"
+
+7. add_padding(
+    bbox: BoundingBox,
+    padding: int,
+    image_shape: Tuple[int, int]
+) -> BoundingBox:
+    \"\"\"
+    Expand bounding box by padding pixels.
+    
+    Args:
+        bbox: Original bounding box
+        padding: Pixels to add on all sides
+        image_shape: (height, width) to clip bounds
+    
+    Returns:
+        Expanded bounding box (clipped to image)
+    
+    Process:
+    - min_x -= padding
+    - min_y -= padding
+    - max_x += padding
+    - max_y += padding
+    - Clip: 0 <= x < width, 0 <= y < height
+    \"\"\"
+
+8. visualize_crops(
+    image: np.ndarray,
+    bboxes: List[BoundingBox],
+    show_order: bool = True
+) -> np.ndarray:
+    \"\"\"
+    Debug visualization: draw boxes with order numbers.
+    
+    Args:
+        image: Original image
+        bboxes: Sorted bounding boxes
+        show_order: Show region_id numbers
+    
+    Returns:
+        Image with boxes and numbers drawn
+    
+    Use for debugging:
+    - Draw rectangle for each box
+    - Show region_id as text (if show_order)
+    - Color: green for high confidence, yellow for medium, red for low
+    \"\"\"
+
+================================================================================
+ERROR HANDLING
+================================================================================
+
+class CropError(Exception):
+    \"\"\"Base exception for cropping errors.\"\"\"
+    pass
+
+class InvalidBoundingBoxError(CropError):
+    \"\"\"Bounding box is invalid.\"\"\"
+    pass
+
+Usage:
+- Validate box coordinates before cropping
+- Skip invalid boxes, log warning
+- Don't fail entire batch for one bad box
+
+================================================================================
+USAGE EXAMPLE
+================================================================================
+
+from preprocessing.cropper import ImageCropper, BoundingBox
+
+# Create cropper
+cropper = ImageCropper(padding=5, min_size=10)
+
+# Get bboxes from detector
+bboxes = [
+    BoundingBox(bbox=[[10,20], [100,20], [100,40], [10,40]], confidence=0.95),
+    BoundingBox(bbox=[[10,50], [120,50], [120,70], [10,70]], confidence=0.88),
+    # ... more boxes
+]
+
+# Extract regions
+regions = cropper.extract_regions(image, bboxes)
+
+# Access crops in order
+for region in regions:
+    crop = region["crop"]  # numpy array
+    print(f"Region {region['region_id']}: Row {region['position']['row']}, Col {region['position']['col']}")
+    
+    # Pass to recognizer
+    text = recognizer.recognize(crop)
+
+# Debug visualization
+debug_img = cropper.visualize_crops(image, bboxes, show_order=True)
+cv2.imwrite("debug_crops.jpg", debug_img)
+
+================================================================================
+TESTING CHECKLIST
+================================================================================
+
+1. test_spatial_sorting()
+   - Create boxes at various positions
+   - Verify top-to-bottom, left-to-right order
+   - Check row grouping (similar Y = same row)
+
+2. test_row_grouping()
+   - Boxes at Y=100, 105, 110 → same row
+   - Boxes at Y=100, 200 → different rows
+   - Verify threshold parameter works
+
+3. test_crop_extraction()
+   - Extract crop from image
+   - Verify crop dimensions
+   - Check padding applied correctly
+
+4. test_boundary_clipping()
+   - Box extends beyond image
+   - Verify clipped to image bounds
+   - No crashes or invalid slices
+
+5. test_filter_small_boxes()
+   - Create tiny box (5x5 pixels)
+   - Verify filtered out (min_size=10)
+
+6. test_extreme_aspect_ratio()
+   - Create very wide box (200x5)
+   - Verify filtered out (aspect > 20:1)
+
+7. test_position_assignment()
+   - Verify row_num and col_num assigned
+   - Check resets per row
+
+8. test_duplicate_removal()
+   - Two overlapping boxes (IOU > 0.95)
+   - Verify only one kept
+
+================================================================================
+IMPLEMENTATION NOTES
+================================================================================
+
+1. **Row Detection Threshold**:
+   - Default 10 pixels works for most scanned documents
+   - May need tuning for low-DPI images (increase threshold)
+   - For high-DPI: decrease threshold
+
+2. **Sorting Stability**:
+   - Use stable sort to preserve detection order when positions equal
+   - Python's sorted() is stable by default
+
+3. **Column Alignment**:
+   - For financial tables: detect column positions from first few rows
+   - Snap subsequent rows to detected columns
+   - Helps align debit/credit/balance columns
+
+4. **Multi-line Descriptions**:
+   - Description may span multiple rows
+   - Detect by: no date/amount in row + close vertical proximity
+   - Merge with previous transaction
+
+5. **Padding Choice**:
+   - Too little (0-2px): May cut off text edges
+   - Too much (10+px): Includes noise, slows recognition
+   - Recommended: 3-5 pixels
+
+================================================================================
+INTEGRATION POINTS
+================================================================================
+
+Called by:
+- core/pipeline.py (Stage 3: Cropping)
+
+Input from:
+- ocr/detection/paddle_detector.py (provides bboxes)
+
+Output to:
+- ocr/recognition/trocr_recognizer.py (receives crops)
+
+================================================================================
+CRITICAL FOR FINANCIAL DATA
+================================================================================
+
+**WHY ORDERING MATTERS:**
+- Wrong order = wrong transaction chronology
+- "Feb 1: -$100" followed by "Jan 31: +$500" is WRONG
+- Must be chronological for accurate financial analysis
+
+**SPATIAL SORTING ENSURES:**
+- Top rows processed first (earlier dates)
+- Left-to-right captures: Date | Description | Debit | Credit | Balance
+
+**TEST WITH REAL STATEMENTS:**
+- Use actual bank statement images
+- Verify transactions extracted in correct order
+- Compare with manual reading
+
+================================================================================
+PERFORMANCE CONSIDERATIONS
+================================================================================
+
+- Typical: 50-100 boxes per page
+- Sorting: O(n log n) - negligible
+- Cropping: O(n) - 1-2ms per crop
+- Total: < 100ms for full page
+
+Optimization:
+- Vectorize crop extraction if >1000 boxes
+- Use NumPy slicing (already fast)
+
+================================================================================
+END OF DEFINITION
+================================================================================
+"""

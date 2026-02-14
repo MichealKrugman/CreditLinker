@@ -1,0 +1,338 @@
+┌─────────────┐
+│ Android App │─┐
+├─────────────┤ │
+│  iOS App    │─┼──→ HTTP ──→ ┌──────────────┐
+├─────────────┤ │             │ Your Server  │
+│  Web App    │─┘             │ (ledger-sdk) │
+└─────────────┘               └──────────────┘
+                                     │
+                                  ┌──┴──┐
+                                  │ GPU │
+                                  └─────┘
+
+
+
+
+
+
+**API-first product**.
+
+---
+
+# Final Recommended Repo Structure (Production-Ready)
+
+```
+ledger-sdk/
+│
+├── api/                      # Public API layer (FastAPI)
+│   ├── routes/
+│   ├── dependencies/
+│   └── main.py
+│
+├── core/                     # Orchestration layer (VERY IMPORTANT)
+│   ├── pipeline.py
+│   └── config.py
+│
+├── ocr/                      # PaddleOCR wrapper
+│   ├── client.py
+│   └── container/
+│
+├── preprocessing/            # Image cleanup logic
+│   └── image_cleaner.py
+│
+├── recognizer/               # Handwriting recognition logic
+│   ├── model_client.py
+│   └── training/
+│
+├── table_reconstruction/     # Structure reconstruction
+│   └── mapper.py
+│
+├── rules_engine/             # Your moat
+│   ├── normalization.py
+│   ├── validation.py
+│   ├── inference.py
+│   └── scoring.py
+│
+├── schemas/                  # Output contracts
+│   ├── ledger_row.py
+│   └── responses.py
+│
+├── storage/                  # DB access layer
+│   └── repository.py
+│
+├── ui/                       # Human review frontend
+│
+├── tests/
+│
+├── docker/
+│
+└── docs/
+```
+
+Notice one key addition:
+
+## `core/` — Orchestration Layer
+
+This is critical.
+
+Most AI-generated systems fail because everything talks to everything.
+
+Instead:
+
+**Only `core/pipeline.py` orchestrates the flow.**
+
+Nothing else directly calls each other randomly.
+
+---
+
+# What Each Folder Really Means (Strategically)
+
+
+
+## api/
+
+This is your public interface.
+
+Responsibilities:
+
+* Authentication
+* Request validation
+* Rate limiting
+* Calling `core.pipeline`
+* Returning structured JSON
+
+It must NOT contain:
+
+* OCR logic
+* Business rules
+* Image processing
+
+---
+
+## core/
+
+This is the brain.
+
+`pipeline.py` defines:
+
+```
+def process_ledger(image):
+    cleaned = preprocess(image)
+    layout = detect_layout(cleaned)
+    recognized = recognize(layout)
+    rows = reconstruct_table(recognized)
+    normalized = apply_rules(rows)
+    scored = score(normalized)
+    return scored
+```
+
+Everything flows through here.
+
+This keeps your system modular and replaceable.
+
+---
+
+## ocr/
+
+This wraps **PaddleOCR**.
+
+You do NOT embed PaddleOCR deeply.
+
+You:
+
+* Run it as a Docker container
+* Expose a simple internal API
+* Call it via `client.py`
+
+This makes it swappable later.
+
+---
+
+## preprocessing/
+
+Pure image transformations.
+
+No business logic.
+
+Only:
+
+* Deskew
+* Thresholding
+* Line removal
+* Contrast enhancement
+
+Replaceable and testable independently.
+
+---
+
+## recognizer/
+
+If you later swap to a transformer model, it lives here.
+
+You abstract it:
+
+```
+class Recognizer:
+    def recognize(self, image_segment):
+        ...
+```
+
+Your pipeline doesn’t care which model is behind it.
+
+---
+
+## table_reconstruction/
+
+OCR returns messy bounding boxes.
+
+This layer:
+
+* Sorts by Y-axis
+* Clusters into rows
+* Aligns columns
+* Infers headers
+
+This is extremely important for handwritten ledgers.
+
+---
+
+## rules_engine/ (Your Moat)
+
+This folder defines your competitive advantage.
+
+Break it into submodules:
+
+### normalization.py
+
+* Fix O/0 errors
+* Date formatting
+* Currency formatting
+
+### validation.py
+
+* Debit XOR credit rule
+* Amount numeric check
+* Date validity
+* Balance reconciliation
+
+### inference.py
+
+* Infer missing debit/credit
+* Detect column meaning
+
+### scoring.py
+
+* Combine OCR confidence + rule confidence
+* Output `confidence` + `needs_review`
+
+This is the heart of your business value.
+
+---
+
+## schemas/
+
+Strict Pydantic contracts.
+
+This ensures:
+
+* Output is always structured
+* Downstream systems trust the data
+* You can version API changes
+
+---
+
+## storage/
+
+Never mix DB logic with business rules.
+
+This layer:
+
+* Saves raw OCR output
+* Saves structured output
+* Saves human corrections
+* Logs audit trails
+
+---
+
+## ui/
+
+Human review app.
+
+Very important for messy handwriting.
+
+Should:
+
+* Highlight low-confidence tokens
+* Allow inline editing
+* Save corrections
+* Feed active learning
+
+---
+
+# The Most Important Engineering Rule
+
+Every layer should be replaceable.
+
+If tomorrow:
+
+* PaddleOCR becomes obsolete
+* You switch to a better handwriting model
+* You outsource OCR entirely
+
+You only modify one folder.
+
+This is how you protect yourself as a founder.
+
+
+
+# Step 4 — Versioning Strategy (Critical)
+
+You must version:
+
+* API versions
+* Schema versions
+* Model versions
+* Rules versions
+
+Example:
+
+```
+X-Model-Version: 1.3
+X-Rules-Version: 2.1
+```
+
+This allows:
+
+* Rollbacks
+* A/B testing
+* Drift monitoring
+
+Most startups ignore this and regret it later.
+
+---
+
+# Governance as a Non-Coder Founder
+
+Since you don’t code, your job is:
+
+You control:
+
+* Architecture
+* Interfaces
+* Contracts
+* Evaluation metrics
+* Acceptance criteria
+
+You do NOT need to code.
+
+You need to define:
+
+1. What input looks like
+2. What output must guarantee
+3. What confidence threshold means
+4. When something needs review
+
+That’s leadership.
+
+
+

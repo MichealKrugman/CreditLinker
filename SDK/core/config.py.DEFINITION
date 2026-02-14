@@ -1,0 +1,293 @@
+"""
+CORE/CONFIG.PY - DEFINITION
+
+PURPOSE:
+Centralized runtime configuration for the entire extraction system.
+Single source of truth for all settings, thresholds, and paths.
+
+---
+
+CLASS: Config
+-------------
+
+STRUCTURE:
+
+class Config:
+    # MODEL SELECTION
+    default_detector: str = "paddle"
+    default_recognizer: str = "trocr"
+    
+    # MODEL PATHS
+    paddle_det_model_path: str = "vendor/PaddleOCR/models/det/paddle_det.pdmodel"
+    paddle_rec_model_path: str = "vendor/PaddleOCR/models/rec/paddle_rec.pdmodel"
+    trocr_encoder_path: str = "ocr/models/trocr/encoder.onnx"
+    trocr_decoder_path: str = "ocr/models/trocr/decoder.onnx"
+    trocr_vocab_path: str = "ocr/models/trocr/vocab.json"
+    trocr_merges_path: str = "ocr/models/trocr/merges.txt"
+    
+    # THRESHOLDS
+    detection_confidence_threshold: float = 0.6
+    recognition_confidence_threshold: float = 0.7
+    min_text_region_size: int = 10  # pixels
+    
+    # DEVICE CONFIGURATION
+    device: str = "cuda:0"  # or "cpu"
+    use_gpu: bool = True
+    gpu_memory_fraction: float = 0.8
+    
+    # BATCH PROCESSING
+    batch_size: int = 8
+    max_workers: int = 4
+    
+    # RECOGNITION SETTINGS
+    use_beam_search: bool = True
+    beam_width: int = 5
+    max_sequence_length: int = 256
+    temperature: float = 1.0  # For sampling
+    
+    # PREPROCESSING
+    target_image_size: tuple = (384, 384)  # For TrOCR
+    normalization_mean: tuple = (0.485, 0.456, 0.406)  # ImageNet stats
+    normalization_std: tuple = (0.229, 0.224, 0.225)
+    apply_denoising: bool = False
+    apply_contrast_enhancement: bool = False
+    
+    # RULES ENGINE
+    currency_symbol: str = "₦"
+    default_date_format: str = "DD/MM/YYYY"
+    validation_strictness: str = "medium"  # "strict", "medium", "lenient"
+    
+    # CACHING
+    enable_caching: bool = True
+    cache_dir: str = ".cache"
+    cache_max_size_mb: int = 1000
+    
+    # LOGGING
+    log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+    log_file: str = "sdk.log"
+    log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+    # PERFORMANCE
+    enable_profiling: bool = False
+    profile_output_dir: str = "profiles/"
+    
+    # FALLBACK CHAIN
+    recognizer_fallback_chain: List[str] = ["trocr", "paddle", "tesseract"]
+    
+    # DEBUG
+    include_debug_info: bool = False
+    save_intermediate_results: bool = False
+    intermediate_output_dir: str = "debug/"
+
+---
+
+METHODS:
+
+@classmethod
+def load(cls, config_path: str) -> "Config":
+    """
+    Load configuration from YAML or JSON file.
+    
+    Example:
+        config = Config.load("config.yaml")
+    
+    Validation:
+    - Check all required paths exist
+    - Validate threshold ranges (0.0 to 1.0)
+    - Ensure device is valid ("cpu" or "cuda:N")
+    - Fail fast on invalid config
+    """
+
+def validate(self) -> bool:
+    """
+    Validate configuration values.
+    
+    Checks:
+    - All model paths exist
+    - Thresholds in valid range (0.0-1.0)
+    - Device is available
+    - Batch size > 0
+    - Beam width > 0
+    
+    Raises:
+        ConfigValidationError: If any check fails
+    """
+
+def save(self, output_path: str):
+    """
+    Save current configuration to file.
+    
+    Use Cases:
+    - Save config used for specific run
+    - Export config for reproducibility
+    - Create template config
+    """
+
+def get(self, key: str, default=None):
+    """
+    Get configuration value with fallback.
+    
+    Example:
+        batch_size = config.get("batch_size", 8)
+    """
+
+def set(self, key: str, value):
+    """
+    Set configuration value at runtime.
+    
+    Example:
+        config.set("device", "cpu")
+    
+    Triggers:
+    - Re-validation after set
+    - Logging of changed values
+    """
+
+def merge(self, other_config: dict):
+    """
+    Merge another config dict into this one.
+    
+    Use Cases:
+    - Environment-specific overrides
+    - User-provided settings
+    - Experiment configurations
+    
+    Example:
+        base_config = Config.load("base.yaml")
+        base_config.merge({"device": "cpu", "batch_size": 4})
+    """
+
+---
+
+ENVIRONMENT VARIABLE OVERRIDES:
+
+Support environment variables with prefix SDK_:
+
+SDK_DEVICE=cpu
+SDK_BATCH_SIZE=16
+SDK_USE_BEAM_SEARCH=false
+
+Override priority:
+1. Environment variables (highest)
+2. Config file
+3. Default values (lowest)
+
+---
+
+CONFIGURATION PROFILES:
+
+class Config:
+    @classmethod
+    def for_development(cls):
+        """Development configuration."""
+        config = cls()
+        config.log_level = "DEBUG"
+        config.include_debug_info = True
+        config.save_intermediate_results = True
+        return config
+    
+    @classmethod
+    def for_production(cls):
+        """Production configuration."""
+        config = cls()
+        config.log_level = "WARNING"
+        config.include_debug_info = False
+        config.save_intermediate_results = False
+        config.enable_profiling = False
+        return config
+    
+    @classmethod
+    def for_testing(cls):
+        """Testing configuration."""
+        config = cls()
+        config.device = "cpu"
+        config.batch_size = 1
+        config.enable_caching = False
+        return config
+
+---
+
+EXAMPLE CONFIG FILE (config.yaml):
+
+```yaml
+# Model Selection
+default_detector: paddle
+default_recognizer: trocr
+
+# Model Paths
+model_paths:
+  trocr:
+    encoder: ocr/models/trocr/encoder.onnx
+    decoder: ocr/models/trocr/decoder.onnx
+    vocab: ocr/models/trocr/vocab.json
+    merges: ocr/models/trocr/merges.txt
+  paddle:
+    detection: vendor/PaddleOCR/models/det/
+    recognition: vendor/PaddleOCR/models/rec/
+
+# Thresholds
+thresholds:
+  detection_confidence: 0.6
+  recognition_confidence: 0.7
+  min_text_region_size: 10
+
+# Device
+device:
+  type: cuda  # cpu or cuda
+  gpu_id: 0
+  memory_fraction: 0.8
+
+# Processing
+processing:
+  batch_size: 8
+  max_workers: 4
+  use_beam_search: true
+  beam_width: 5
+
+# Preprocessing
+preprocessing:
+  target_size: [384, 384]
+  normalization:
+    mean: [0.485, 0.456, 0.406]
+    std: [0.229, 0.224, 0.225]
+  augmentations:
+    denoising: false
+    contrast_enhancement: false
+
+# Rules Engine
+rules:
+  currency: "₦"
+  date_format: "DD/MM/YYYY"
+  validation_strictness: medium
+
+# Fallback
+fallback_chain: [trocr, paddle, tesseract]
+
+# Logging
+logging:
+  level: INFO
+  file: logs/sdk.log
+```
+
+---
+
+USAGE EXAMPLE:
+
+# Load from file
+config = Config.load("config.yaml")
+
+# Override specific values
+config.set("device", "cpu")
+config.set("batch_size", 4)
+
+# Or use environment variables
+# export SDK_DEVICE=cpu
+# config will automatically pick it up
+
+# Use in components
+detector = PaddleDetector(config)
+recognizer = TrOCRRecognizer(config)
+
+# Save config for reproducibility
+config.save("run_2024_config.yaml")
+"""

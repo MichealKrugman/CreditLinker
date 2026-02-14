@@ -1,0 +1,164 @@
+TrOCR MODEL FILES - REQUIRED ASSETS
+
+This directory must contain the following files for TrOCR inference:
+
+REQUIRED FILES:
+===============
+
+1. encoder.onnx (~300MB)
+   - TrOCR vision encoder model
+   - Converts image patches to embeddings
+   - Input shape: (1, 3, 384, 384)
+   - Output: (1, sequence_length, 768) embeddings
+
+2. decoder.onnx (~400MB)
+   - TrOCR text decoder model
+   - Generates character sequence from embeddings
+   - Auto-regressive generation
+   - Output: token probabilities
+
+3. vocab.json (~1MB)
+   - BPE vocabulary mapping
+   - Format: {"token_string": token_id}
+   - Contains ~50,000 tokens
+   - Used for tokenization/detokenization
+
+4. merges.txt (~500KB)
+   - BPE merge operations
+   - Format: "token1 token2" (one per line)
+   - Used during tokenization
+
+HOW TO OBTAIN THESE FILES:
+==========================
+
+OPTION 1: Export from Hugging Face (Recommended)
+-------------------------------------------------
+```bash
+pip install transformers torch onnx
+
+python << EOF
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+import torch
+
+# Load pretrained model
+model_name = "microsoft/trocr-base-printed"
+model = VisionEncoderDecoderModel.from_pretrained(model_name)
+processor = TrOCRProcessor.from_pretrained(model_name)
+
+# Export encoder to ONNX
+dummy_image = torch.randn(1, 3, 384, 384)
+torch.onnx.export(
+    model.encoder,
+    dummy_image,
+    "encoder.onnx",
+    input_names=["pixel_values"],
+    output_names=["last_hidden_state"],
+    dynamic_axes={"pixel_values": {0: "batch_size"}},
+    opset_version=14
+)
+
+# Export decoder (more complex - requires custom export script)
+# See: https://github.com/microsoft/onnxruntime/blob/main/onnxruntime/python/tools/transformers/models/t5/convert_to_onnx.py
+
+# Save tokenizer files
+processor.tokenizer.save_pretrained("./")
+# This creates vocab.json and merges.txt
+EOF
+```
+
+OPTION 2: Download Pre-Exported Models
+---------------------------------------
+Check project releases or these sources:
+- Hugging Face Model Hub (ONNX variants)
+- Official TrOCR repository
+- Pre-converted ONNX models from community
+
+OPTION 3: Use Optimum Library (Easiest)
+----------------------------------------
+```bash
+pip install optimum[onnxruntime]
+
+python << EOF
+from optimum.onnxruntime import ORTModelForVision2Seq
+from transformers import TrOCRProcessor
+
+model = ORTModelForVision2Seq.from_pretrained(
+    "microsoft/trocr-base-printed",
+    export=True  # Auto-converts to ONNX
+)
+
+# Save ONNX files
+model.save_pretrained("./trocr_onnx")
+
+# Also save processor
+processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-printed")
+processor.save_pretrained("./trocr_onnx")
+
+# Move files to SDK directory:
+# mv trocr_onnx/encoder_model.onnx → encoder.onnx
+# mv trocr_onnx/decoder_model.onnx → decoder.onnx
+# vocab.json and merges.txt already in trocr_onnx/
+EOF
+```
+
+VERIFICATION:
+=============
+
+After obtaining files, verify they work:
+
+```python
+import onnxruntime as ort
+import json
+
+# Test encoder
+encoder_session = ort.InferenceSession("encoder.onnx")
+print("Encoder inputs:", encoder_session.get_inputs()[0].name)
+print("Encoder outputs:", encoder_session.get_outputs()[0].name)
+
+# Test decoder
+decoder_session = ort.InferenceSession("decoder.onnx")
+print("Decoder loaded successfully")
+
+# Test vocab
+with open("vocab.json") as f:
+    vocab = json.load(f)
+print(f"Vocabulary size: {len(vocab)}")
+
+# Test merges
+with open("merges.txt") as f:
+    merges = f.readlines()
+print(f"BPE merges: {len(merges)}")
+
+print("\n✅ All TrOCR files verified successfully!")
+```
+
+EXPECTED FILE SIZES:
+====================
+- encoder.onnx: ~300MB
+- decoder.onnx: ~400MB
+- vocab.json: ~1MB
+- merges.txt: ~500KB
+
+MODELS DIRECTORY STRUCTURE:
+===========================
+SDK/ocr/models/trocr/
+├── encoder.onnx      ← Vision encoder
+├── decoder.onnx      ← Text decoder
+├── vocab.json        ← Token vocabulary
+└── merges.txt        ← BPE merges
+
+IMPORTANT NOTES:
+================
+1. These are FROZEN assets - do not modify
+2. Version these files separately from code
+3. Use git LFS for version control (files are large)
+4. Verify checksums after download
+5. Keep backup copies
+
+TROUBLESHOOTING:
+================
+- If export fails: Try different opset_version (11, 12, 13, 14)
+- If files too large: Use quantization (int8) for smaller files
+- If inference slow: Use GPU providers in onnxruntime-gpu
+
+For help: See SDK/COMPLETE_DEFINITIONS.md section on TrOCR

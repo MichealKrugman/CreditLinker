@@ -1,0 +1,480 @@
+"""
+FILE: ocr/recognition/decoders.py
+PURPOSE: Text generation algorithms for sequence-to-sequence models
+
+RESPONSIBILITY:
+Convert model logits (probabilities) into readable text using greedy or beam search decoding.
+Used by TrOCR and other seq2seq recognizers to generate character sequences.
+
+================================================================================
+DEPENDENCIES
+================================================================================
+import numpy as np
+from typing import List, Tuple, Dict
+import logging
+
+No external packages needed (uses numpy only)
+
+================================================================================
+CONSTANTS
+================================================================================
+
+# Special tokens (standard for many transformers)
+BOS_TOKEN_ID = 2   # Begin of sequence
+EOS_TOKEN_ID = 3   # End of sequence
+PAD_TOKEN_ID = 1   # Padding token
+UNK_TOKEN_ID = 0   # Unknown token
+
+================================================================================
+FUNCTION: greedy_decode
+================================================================================
+
+def greedy_decode(
+    decoder_session,
+    encoder_outputs: np.ndarray,
+    vocab: Dict[str, int],
+    max_length: int = 256,
+    bos_token_id: int = BOS_TOKEN_ID,
+    eos_token_id: int = EOS_TOKEN_ID
+) -> Tuple[List[int], float]:
+    \"\"\"
+    Greedy decoding: select highest probability token at each step.
+    
+    Fast but may not find optimal sequence.
+    
+    Args:
+        decoder_session: ONNX decoder session
+        encoder_outputs: Encoder hidden states (1, seq_len, hidden_size)
+        vocab: Token vocabulary {token_str: token_id}
+        max_length: Maximum sequence length
+        bos_token_id: Begin of sequence token
+        eos_token_id: End of sequence token
+    
+    Returns:
+        (token_ids, average_confidence)
+        - token_ids: List of predicted token IDs
+        - average_confidence: Mean probability across all tokens
+    
+    Algorithm:
+    1. Initialize: current_tokens = [bos_token_id]
+    2. Loop until EOS or max_length:
+        a. Run decoder with current tokens + encoder outputs
+        b. Get logits for next token position
+        c. Apply softmax → probabilities
+        d. Select token with highest probability
+        e. Record confidence (probability of selected token)
+        f. Append to current_tokens
+        g. If token is EOS, stop
+    3. Return token_ids (without BOS/EOS) and average confidence
+    
+    Example:
+        Input: Cropped text line image → encoder → encoder_outputs
+        Decode: [BOS] → 'H' → 'e' → 'l' → 'l' → 'o' → [EOS]
+        Output: token_ids = [104, 101, 108, 108, 111], confidence = 0.92
+    \"\"\"
+    
+    # Pseudocode:
+    # current_tokens = [bos_token_id]
+    # confidences = []
+    # 
+    # for step in range(max_length):
+    #     # Run decoder
+    #     outputs = decoder_session.run(
+    #         output_names=['logits'],
+    #         input_feed={
+    #             'input_ids': np.array([current_tokens]),
+    #             'encoder_hidden_states': encoder_outputs
+    #         }
+    #     )
+    #     
+    #     # Get logits for next token
+    #     logits = outputs[0][0, -1, :]  # Last position
+    #     probs = softmax(logits)
+    #     
+    #     # Greedy selection
+    #     next_token = np.argmax(probs)
+    #     confidence = probs[next_token]
+    #     
+    #     current_tokens.append(int(next_token))
+    #     confidences.append(float(confidence))
+    #     
+    #     if next_token == eos_token_id:
+    #         break
+    # 
+    # # Remove BOS/EOS
+    # token_ids = current_tokens[1:]  # Skip BOS
+    # if token_ids[-1] == eos_token_id:
+    #     token_ids = token_ids[:-1]  # Remove EOS
+    # 
+    # avg_confidence = sum(confidences) / len(confidences)
+    # return token_ids, avg_confidence
+
+================================================================================
+FUNCTION: beam_search_decode
+================================================================================
+
+def beam_search_decode(
+    decoder_session,
+    encoder_outputs: np.ndarray,
+    vocab: Dict[str, int],
+    beam_width: int = 5,
+    max_length: int = 256,
+    bos_token_id: int = BOS_TOKEN_ID,
+    eos_token_id: int = EOS_TOKEN_ID,
+    length_penalty: float = 1.0,
+    temperature: float = 1.0
+) -> Tuple[List[int], float]:
+    \"\"\"
+    Beam search decoding: maintain top-k candidates, return best sequence.
+    
+    More accurate than greedy but slower. Explores multiple paths simultaneously.
+    
+    Args:
+        decoder_session: ONNX decoder session
+        encoder_outputs: Encoder hidden states
+        vocab: Token vocabulary
+        beam_width: Number of beams (candidates) to maintain
+        max_length: Maximum sequence length
+        bos_token_id: Begin of sequence token
+        eos_token_id: End of sequence token
+        length_penalty: Penalty for longer sequences (< 1.0 = prefer longer)
+        temperature: Softmax temperature (higher = more diverse)
+    
+    Returns:
+        (best_token_ids, best_score)
+    
+    Algorithm:
+    1. Initialize beam with single candidate: [BOS]
+    2. For each step:
+        a. For each candidate in beam:
+           - Run decoder
+           - Get top-k next tokens
+           - Create k new candidates (old + each new token)
+        b. Score all new candidates using log probabilities
+        c. Keep top beam_width candidates
+        d. Remove candidates that generated EOS (move to finished)
+    3. When all beams finished or max_length reached:
+        a. Apply length penalty
+        b. Return candidate with best score
+    
+    Scoring:
+        score = log_prob / (length ** length_penalty)
+        
+        length_penalty = 1.0: No penalty (standard)
+        length_penalty < 1.0: Favor longer sequences
+        length_penalty > 1.0: Favor shorter sequences
+    
+    Example:
+        beam_width = 3
+        Step 0: ["<BOS>"]
+        Step 1: ["<BOS> H", "<BOS> T", "<BOS> A"]  (top 3)
+        Step 2: ["<BOS> H e", "<BOS> H i", "<BOS> T h"]  (expand each, keep top 3)
+        ...
+        Final: ["<BOS> Hello <EOS>"] with best score
+    \"\"\"
+    
+    # Pseudocode structure:
+    # 
+    # Candidate = {tokens: List[int], score: float, finished: bool}
+    # 
+    # beams = [Candidate(tokens=[bos_token_id], score=0.0, finished=False)]
+    # finished_beams = []
+    # 
+    # for step in range(max_length):
+    #     all_candidates = []
+    #     
+    #     for beam in beams:
+    #         if beam.finished:
+    #             continue
+    #         
+    #         # Run decoder
+    #         outputs = decoder_session.run(...)
+    #         logits = outputs[0][0, -1, :]
+    #         
+    #         # Apply temperature
+    #         logits = logits / temperature
+    #         probs = softmax(logits)
+    #         log_probs = np.log(probs + 1e-10)
+    #         
+    #         # Get top-k tokens
+    #         top_k_indices = np.argsort(log_probs)[-beam_width:]
+    #         
+    #         for token_id in top_k_indices:
+    #             new_tokens = beam.tokens + [token_id]
+    #             new_score = beam.score + log_probs[token_id]
+    #             
+    #             candidate = Candidate(
+    #                 tokens=new_tokens,
+    #                 score=new_score,
+    #                 finished=(token_id == eos_token_id)
+    #             )
+    #             
+    #             if candidate.finished:
+    #                 finished_beams.append(candidate)
+    #             else:
+    #                 all_candidates.append(candidate)
+    #     
+    #     # Keep top beam_width candidates
+    #     all_candidates.sort(key=lambda c: c.score, reverse=True)
+    #     beams = all_candidates[:beam_width]
+    #     
+    #     if not beams:  # All finished
+    #         break
+    # 
+    # # Select best candidate
+    # all_final = finished_beams + beams
+    # for candidate in all_final:
+    #     length = len(candidate.tokens)
+    #     candidate.score = candidate.score / (length ** length_penalty)
+    # 
+    # best = max(all_final, key=lambda c: c.score)
+    # token_ids = best.tokens[1:]  # Remove BOS
+    # if token_ids[-1] == eos_token_id:
+    #     token_ids = token_ids[:-1]
+    # 
+    # return token_ids, best.score
+
+================================================================================
+UTILITY FUNCTIONS
+================================================================================
+
+def softmax(logits: np.ndarray, temperature: float = 1.0) -> np.ndarray:
+    \"\"\"
+    Apply softmax to convert logits to probabilities.
+    
+    Args:
+        logits: Raw model outputs (unnormalized)
+        temperature: Softmax temperature (default: 1.0)
+    
+    Returns:
+        Probabilities (sum to 1.0)
+    
+    Formula:
+        softmax(x_i) = exp(x_i / T) / sum(exp(x_j / T))
+        
+    Temperature effects:
+    - T = 1.0: Standard softmax
+    - T > 1.0: More uniform (diverse)
+    - T < 1.0: More peaked (confident)
+    \"\"\"
+    # Numerical stability: subtract max
+    logits = logits / temperature
+    exp_logits = np.exp(logits - np.max(logits))
+    return exp_logits / np.sum(exp_logits)
+
+def log_softmax(logits: np.ndarray, temperature: float = 1.0) -> np.ndarray:
+    \"\"\"
+    Compute log probabilities (more numerically stable than log(softmax())).
+    
+    Args:
+        logits: Raw model outputs
+        temperature: Softmax temperature
+    
+    Returns:
+        Log probabilities
+    
+    Formula:
+        log_softmax(x_i) = (x_i / T) - log(sum(exp(x_j / T)))
+    \"\"\"
+    logits = logits / temperature
+    return logits - np.log(np.sum(np.exp(logits - np.max(logits))))
+
+def top_k_sampling(
+    logits: np.ndarray,
+    k: int = 10,
+    temperature: float = 1.0
+) -> int:
+    \"\"\"
+    Sample token from top-k most probable.
+    
+    More diverse than greedy, less exhaustive than beam search.
+    
+    Args:
+        logits: Model logits for next token
+        k: Number of top tokens to consider
+        temperature: Sampling temperature
+    
+    Returns:
+        Sampled token ID
+    
+    Process:
+    1. Get top-k tokens by probability
+    2. Renormalize probabilities among top-k
+    3. Sample from this distribution
+    \"\"\"
+    probs = softmax(logits, temperature)
+    top_k_indices = np.argsort(probs)[-k:]
+    top_k_probs = probs[top_k_indices]
+    top_k_probs = top_k_probs / np.sum(top_k_probs)  # Renormalize
+    
+    # Sample
+    sampled_idx = np.random.choice(len(top_k_indices), p=top_k_probs)
+    return int(top_k_indices[sampled_idx])
+
+================================================================================
+USAGE EXAMPLES
+================================================================================
+
+from ocr.recognition.decoders import greedy_decode, beam_search_decode
+import onnxruntime as ort
+
+# Load models
+encoder_session = ort.InferenceSession("encoder.onnx")
+decoder_session = ort.InferenceSession("decoder.onnx")
+
+# Load vocabulary
+import json
+with open("vocab.json") as f:
+    vocab = json.load(f)
+
+# Encode image
+import numpy as np
+image = np.random.randn(1, 3, 384, 384).astype(np.float32)
+encoder_outputs = encoder_session.run(
+    ['last_hidden_state'],
+    {'pixel_values': image}
+)[0]
+
+# Greedy decode (fast)
+token_ids, confidence = greedy_decode(
+    decoder_session,
+    encoder_outputs,
+    vocab,
+    max_length=256
+)
+print(f"Greedy: {token_ids}, confidence: {confidence:.3f}")
+
+# Beam search (better accuracy)
+token_ids, score = beam_search_decode(
+    decoder_session,
+    encoder_outputs,
+    vocab,
+    beam_width=5,
+    max_length=256,
+    length_penalty=1.0
+)
+print(f"Beam: {token_ids}, score: {score:.3f}")
+
+# Convert tokens to text (done in recognizer)
+# text = tokenizer.decode(token_ids)
+
+================================================================================
+TESTING CHECKLIST
+================================================================================
+
+1. test_greedy_decode_basic()
+   - Simple sequence
+   - Verify outputs token IDs
+   - Check confidence in [0, 1]
+
+2. test_greedy_decode_early_stop()
+   - Sequence with EOS in middle
+   - Verify stops at EOS
+   - No tokens after EOS
+
+3. test_beam_search_basic()
+   - Compare to greedy
+   - Beam should find better/equal score
+   - Verify beam_width parameter works
+
+4. test_beam_search_length_penalty()
+   - Test penalty < 1.0 (longer seqs)
+   - Test penalty > 1.0 (shorter seqs)
+   - Verify affects output length
+
+5. test_softmax()
+   - Verify probabilities sum to 1.0
+   - Test temperature scaling
+   - Check numerical stability (large logits)
+
+6. test_max_length_limit()
+   - Force very long sequence
+   - Verify stops at max_length
+   - No infinite loops
+
+7. test_empty_vocab()
+   - Handle edge case gracefully
+
+8. test_confidence_calculation()
+   - Greedy confidence makes sense
+   - Beam score makes sense
+
+================================================================================
+IMPLEMENTATION NOTES
+================================================================================
+
+1. **ONNX Session I/O**:
+   - Check decoder input names: ['input_ids', 'encoder_hidden_states']
+   - Check output names: ['logits'] or ['last_hidden_state']
+   - Use decoder_session.get_inputs() to verify
+
+2. **Numerical Stability**:
+   - Always subtract max before exp() in softmax
+   - Add small epsilon (1e-10) before log()
+   - Use float64 for accumulating log probabilities
+
+3. **Memory Efficiency**:
+   - For long sequences, beam search uses O(beam_width * max_length) memory
+   - Consider max_length limit (256 is reasonable)
+
+4. **Speed vs Accuracy**:
+   - Greedy: ~10ms per sequence
+   - Beam (width=5): ~50ms per sequence
+   - Use greedy for real-time, beam for quality
+
+5. **Temperature Tuning**:
+   - T=1.0: Default, no change
+   - T=0.5: More confident (peaked distribution)
+   - T=2.0: More diverse (flatter distribution)
+
+6. **Length Penalty**:
+   - Default 1.0 (no penalty)
+   - Use 0.8-0.9 for longer outputs (paragraphs)
+   - Use 1.1-1.2 for shorter outputs (single words)
+
+================================================================================
+INTEGRATION POINTS
+================================================================================
+
+Called by:
+- ocr/recognition/trocr_recognizer.py (main user)
+- ocr/recognition/paddle_recognizer.py (if using decoder)
+
+Input from:
+- ONNX decoder session outputs (logits)
+- Encoder hidden states
+
+Output to:
+- Token IDs (list of integers)
+- Confidence/score (float)
+
+Downstream:
+- Tokens decoded to text using vocabulary
+- Confidence used for filtering low-quality results
+
+================================================================================
+PERFORMANCE BENCHMARKS
+================================================================================
+
+Greedy decode:
+- Single sequence: ~5-10ms
+- Batch of 8: ~30ms
+- Dominated by decoder inference time
+
+Beam search (width=5):
+- Single sequence: ~30-50ms
+- 5x slower than greedy (expected)
+- Worth it for critical text (financial amounts)
+
+Memory:
+- Greedy: ~1MB per sequence
+- Beam (width=5): ~5MB per sequence
+
+Recommendation:
+- Use greedy for bulk text (descriptions)
+- Use beam for critical fields (amounts, dates)
+
+================================================================================
+END OF DEFINITION
+================================================================================
+"""

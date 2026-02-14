@@ -1,0 +1,433 @@
+"""
+FILE: schemas/ledger_schema.py  
+PURPOSE: Data models for financial ledger and transaction structures
+
+RESPONSIBILITY:
+Define Pydantic models for representing extracted financial data.
+Ensures type safety, validation, and JSON serialization throughout the SDK.
+
+================================================================================
+DEPENDENCIES
+================================================================================
+from pydantic import BaseModel, Field, validator, root_validator
+from datetime import datetime, date
+from typing import List, Optional, Dict, Tuple
+from enum import Enum
+from decimal import Decimal
+
+pip install: pydantic>=2.0.0
+
+================================================================================
+ENUMS
+================================================================================
+
+class TransactionType(str, Enum):
+    \"\"\"Type of transaction.\"\"\"
+    CREDIT = "credit"   # Money in
+    DEBIT = "debit"     # Money out
+
+class TransactionCategory(str, Enum):
+    \"\"\"Category of transaction.\"\"\"
+    INCOME = "income"
+    EXPENSE_INVENTORY = "expense_inventory"
+    EXPENSE_OPERATIONAL = "expense_operational"
+    EXPENSE_SALARY = "expense_salary"
+    EXPENSE_UTILITIES = "expense_utilities"
+    EXPENSE_OTHER = "expense_other"
+    TRANSFER = "transfer"
+    FEE = "fee"
+    UNCATEGORIZED = "uncategorized"
+
+class Currency(str, Enum):
+    \"\"\"Supported currencies.\"\"\"
+    NGN = "NGN"  # Nigerian Naira
+    USD = "USD"  # US Dollar
+    GBP = "GBP"  # British Pound
+    EUR = "EUR"  # Euro
+
+================================================================================
+MODEL: Transaction
+================================================================================
+
+class Transaction(BaseModel):
+    \"\"\"
+    Single financial transaction from a ledger/statement.
+    
+    Core fields extracted from OCR + rules engine.
+    \"\"\"
+    
+    # Core transaction data
+    date: datetime = Field(..., description="Transaction date")
+    description: str = Field(..., min_length=1, description="Transaction description/narration")
+    
+    # Amounts (at least one must be present)
+    debit: Optional[Decimal] = Field(None, ge=0, description="Debit amount (money out)")
+    credit: Optional[Decimal] = Field(None, ge=0, description="Credit amount (money in)")
+    balance: Optional[Decimal] = Field(None, description="Running balance after transaction")
+    
+    # Classification
+    transaction_type: TransactionType = Field(..., description="Debit or Credit")
+    category: TransactionCategory = Field(
+        default=TransactionCategory.UNCATEGORIZED,
+        description="Transaction category"
+    )
+    
+    # Metadata
+    currency: Currency = Field(default=Currency.NGN, description="Currency code")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="OCR confidence score")
+    
+    # Optional fields
+    reference: Optional[str] = Field(None, description="Transaction reference number")
+    value_date: Optional[datetime] = Field(None, description="Value date (if different from transaction date)")
+    
+    # Internal tracking
+    source_line_number: Optional[int] = Field(None, description="Line number in source document")
+    ocr_metadata: Optional[Dict] = Field(default_factory=dict, description="OCR extraction metadata")
+    
+    @validator('debit', 'credit', 'balance')
+    def validate_amounts(cls, v):
+        \"\"\"Ensure amounts are positive or None.\"\"\"
+        if v is not None and v < 0:
+            raise ValueError("Transaction amounts cannot be negative")
+        return v
+    
+    @root_validator
+    def validate_debit_credit(cls, values):
+        \"\"\"Ensure at least one of debit or credit is present.\"\"\"
+        debit = values.get('debit')
+        credit = values.get('credit')
+        
+        if debit is None and credit is None:
+            raise ValueError("Transaction must have either debit or credit amount")
+        
+        # Set transaction type based on which is present
+        if debit is not None and credit is None:
+            values['transaction_type'] = TransactionType.DEBIT
+        elif credit is not None and debit is None:
+            values['transaction_type'] = TransactionType.CREDIT
+        
+        return values
+    
+    @validator('date')
+    def validate_date_not_future(cls, v):
+        \"\"\"Ensure transaction date is not in future.\"\"\"
+        if v > datetime.now():
+            raise ValueError(f"Transaction date {v} cannot be in the future")
+        return v
+    
+    def get_amount(self) -> Decimal:
+        \"\"\"Get transaction amount (debit or credit).\"\"\"
+        return self.debit if self.debit is not None else self.credit
+    
+    def is_debit(self) -> bool:
+        \"\"\"Check if transaction is a debit.\"\"\"
+        return self.transaction_type == TransactionType.DEBIT
+    
+    def is_credit(self) -> bool:
+        \"\"\"Check if transaction is a credit.\"\"\"
+        return self.transaction_type == TransactionType.CREDIT
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat(),
+            Decimal: lambda v: float(v),
+        }
+        use_enum_values = True
+
+================================================================================
+MODEL: LedgerPage
+================================================================================
+
+class LedgerPage(BaseModel):
+    \"\"\"
+    Single page from a multi-page ledger or statement.
+    \"\"\"
+    
+    page_number: int = Field(..., ge=1, description="Page number (1-indexed)")
+    transactions: List[Transaction] = Field(default_factory=list, description="Transactions on this page")
+    
+    # Page-level metadata
+    opening_balance: Optional[Decimal] = Field(None, description="Balance at start of page")
+    closing_balance: Optional[Decimal] = Field(None, description="Balance at end of page")
+    
+    date_range: Optional[Tuple[datetime, datetime]] = Field(
+        None,
+        description="(start_date, end_date) for transactions on this page"
+    )
+    
+    # Statistics
+    total_debits: Decimal = Field(default=Decimal('0'), description="Sum of all debits")
+    total_credits: Decimal = Field(default=Decimal('0'), description="Sum of all credits")
+    transaction_count: int = Field(default=0, description="Number of transactions")
+    
+    @root_validator
+    def calculate_totals(cls, values):
+        \"\"\"Auto-calculate totals from transactions.\"\"\"
+        transactions = values.get('transactions', [])
+        
+        total_debits = sum((t.debit or Decimal('0')) for t in transactions)
+        total_credits = sum((t.credit or Decimal('0')) for t in transactions)
+        
+        values['total_debits'] = total_debits
+        values['total_credits'] = total_credits
+        values['transaction_count'] = len(transactions)
+        
+        # Calculate date range
+        if transactions:
+            dates = [t.date for t in transactions]
+            values['date_range'] = (min(dates), max(dates))
+        
+        return values
+    
+    def verify_balance_consistency(self) -> bool:
+        \"\"\"
+        Verify running balance is consistent.
+        opening + credits - debits = closing
+        \"\"\"
+        if self.opening_balance is None or self.closing_balance is None:
+            return True  # Can't verify without both
+        
+        expected_closing = self.opening_balance + self.total_credits - self.total_debits
+        tolerance = Decimal('0.01')  # Allow 1 cent difference (floating point)
+        
+        return abs(expected_closing - self.closing_balance) <= tolerance
+
+================================================================================
+MODEL: LedgerDocument
+================================================================================
+
+class LedgerDocument(BaseModel):
+    \"\"\"
+    Complete financial ledger or statement (potentially multi-page).
+    
+    This is the final output of the extraction pipeline.
+    \"\"\"
+    
+    # Document identification
+    account_number: Optional[str] = Field(None, description="Account number")
+    account_name: Optional[str] = Field(None, description="Account holder name")
+    bank_name: Optional[str] = Field(None, description="Bank or institution name")
+    
+    # Statement period
+    statement_start_date: Optional[datetime] = Field(None, description="Statement start date")
+    statement_end_date: Optional[datetime] = Field(None, description="Statement end date")
+    
+    # Content
+    pages: List[LedgerPage] = Field(default_factory=list, description="Pages in document")
+    
+    # Aggregated data
+    total_transactions: int = Field(default=0, description="Total transactions across all pages")
+    total_debits: Decimal = Field(default=Decimal('0'), description="Sum of all debits")
+    total_credits: Decimal = Field(default=Decimal('0'), description="Sum of all credits")
+    net_change: Decimal = Field(default=Decimal('0'), description="credits - debits")
+    
+    # Metadata
+    currency: Currency = Field(default=Currency.NGN, description="Primary currency")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Overall extraction confidence")
+    
+    # Warnings and quality
+    warnings: List[str] = Field(default_factory=list, description="Extraction warnings")
+    validation_errors: List[str] = Field(default_factory=list, description="Validation errors found")
+    
+    # Processing metadata
+    processing_metadata: Dict = Field(
+        default_factory=dict,
+        description="Pipeline metadata (processing time, models used, etc.)"
+    )
+    
+    extracted_at: datetime = Field(
+        default_factory=datetime.now,
+        description="When extraction was performed"
+    )
+    
+    @root_validator
+    def calculate_aggregates(cls, values):
+        \"\"\"Calculate document-level aggregates from pages.\"\"\"
+        pages = values.get('pages', [])
+        
+        # Aggregate transactions
+        all_transactions = []
+        for page in pages:
+            all_transactions.extend(page.transactions)
+        
+        values['total_transactions'] = len(all_transactions)
+        values['total_debits'] = sum((t.debit or Decimal('0')) for t in all_transactions)
+        values['total_credits'] = sum((t.credit or Decimal('0')) for t in all_transactions)
+        values['net_change'] = values['total_credits'] - values['total_debits']
+        
+        # Determine statement period from transactions
+        if all_transactions:
+            dates = [t.date for t in all_transactions]
+            values['statement_start_date'] = min(dates)
+            values['statement_end_date'] = max(dates)
+        
+        return values
+    
+    def get_all_transactions(self) -> List[Transaction]:
+        \"\"\"Get flat list of all transactions across all pages.\"\"\"
+        transactions = []
+        for page in self.pages:
+            transactions.extend(page.transactions)
+        return transactions
+    
+    def get_transactions_by_category(self, category: TransactionCategory) -> List[Transaction]:
+        \"\"\"Filter transactions by category.\"\"\"
+        return [t for t in self.get_all_transactions() if t.category == category]
+    
+    def get_transactions_by_date_range(
+        self,
+        start_date: datetime,
+        end_date: datetime
+    ) -> List[Transaction]:
+        \"\"\"Filter transactions by date range.\"\"\"
+        return [
+            t for t in self.get_all_transactions()
+            if start_date <= t.date <= end_date
+        ]
+    
+    def to_dict(self) -> Dict:
+        \"\"\"Export to JSON-serializable dict.\"\"\"
+        return self.dict()
+    
+    def to_json(self, indent: int = 2) -> str:
+        \"\"\"Export to JSON string.\"\"\"
+        return self.json(indent=indent)
+    
+    def to_csv_rows(self) -> List[Dict]:
+        \"\"\"Export transactions as CSV-ready rows.\"\"\"
+        rows = []
+        for transaction in self.get_all_transactions():
+            rows.append({
+                'date': transaction.date.strftime('%Y-%m-%d'),
+                'description': transaction.description,
+                'debit': float(transaction.debit) if transaction.debit else '',
+                'credit': float(transaction.credit) if transaction.credit else '',
+                'balance': float(transaction.balance) if transaction.balance else '',
+                'category': transaction.category.value,
+                'reference': transaction.reference or '',
+                'confidence': transaction.confidence,
+            })
+        return rows
+
+================================================================================
+USAGE EXAMPLES
+================================================================================
+
+# Create a transaction
+from schemas.ledger_schema import Transaction, TransactionType, TransactionCategory, Currency
+from decimal import Decimal
+from datetime import datetime
+
+transaction = Transaction(
+    date=datetime(2024, 1, 15),
+    description="Salary Payment",
+    credit=Decimal('50000.00'),
+    debit=None,
+    balance=Decimal('125000.00'),
+    transaction_type=TransactionType.CREDIT,
+    category=TransactionCategory.INCOME,
+    currency=Currency.NGN,
+    confidence=0.95,
+    reference="TXN123456"
+)
+
+# Create a page
+from schemas.ledger_schema import LedgerPage
+
+page = LedgerPage(
+    page_number=1,
+    transactions=[transaction],
+    opening_balance=Decimal('75000.00'),
+    closing_balance=Decimal('125000.00')
+)
+
+# Verify balance
+assert page.verify_balance_consistency()
+
+# Create document
+from schemas.ledger_schema import LedgerDocument
+
+document = LedgerDocument(
+    account_number="1234567890",
+    account_name="John Doe",
+    bank_name="First Bank",
+    pages=[page],
+    currency=Currency.NGN,
+    confidence=0.92
+)
+
+# Export to JSON
+json_str = document.to_json()
+
+# Export to CSV
+csv_rows = document.to_csv_rows()
+
+# Query transactions
+income_txns = document.get_transactions_by_category(TransactionCategory.INCOME)
+jan_txns = document.get_transactions_by_date_range(
+    datetime(2024, 1, 1),
+    datetime(2024, 1, 31)
+)
+
+================================================================================
+TESTING CHECKLIST
+================================================================================
+
+1. test_transaction_validation()
+   - Valid transaction created successfully
+   - Negative amount raises ValueError
+   - Missing both debit/credit raises ValueError
+   - Future date raises ValueError
+
+2. test_transaction_type_inference()
+   - Debit set → type=DEBIT
+   - Credit set → type=CREDIT
+
+3. test_page_totals_calculation()
+   - Add transactions to page
+   - Verify totals auto-calculated
+   - Verify date range computed
+
+4. test_balance_consistency()
+   - Valid balance → returns True
+   - Invalid balance → returns False
+   - Missing balance → returns True (can't verify)
+
+5. test_document_aggregation()
+   - Multi-page document
+   - Verify total_transactions correct
+   - Verify net_change = credits - debits
+
+6. test_json_serialization()
+   - Convert to JSON
+   - Parse back
+   - Verify data preserved
+
+7. test_csv_export()
+   - Export to CSV rows
+   - Verify all fields present
+   - Check Decimal → float conversion
+
+8. test_transaction_queries()
+   - Filter by category
+   - Filter by date range
+   - Verify results correct
+
+================================================================================
+INTEGRATION POINTS
+================================================================================
+
+Used by:
+- rules_engine/ledger_rules.py (creates Transaction objects)
+- core/pipeline.py (creates LedgerDocument)
+- api/routes.py (returns as JSON response)
+
+Output to:
+- JSON API responses
+- CSV exports
+- Database storage (if implemented)
+
+================================================================================
+END OF DEFINITION
+================================================================================
+"""

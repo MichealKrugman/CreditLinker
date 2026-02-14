@@ -1,0 +1,230 @@
+"""
+CORE/PIPELINE.PY - DEFINITION
+
+PURPOSE:
+Deterministic execution engine that transforms bank statements into structured transactions.
+This is the MAIN orchestration flow.
+
+---
+
+CLASS: ExtractionPipeline
+--------------------------
+
+INITIALIZATION:
+def __init__(self, detector, recognizer, config):
+    - detector: BaseDetector instance (from orchestrator)
+    - recognizer: BaseRecognizer instance (from orchestrator)
+    - config: Config object with thresholds, settings
+
+---
+
+MAIN METHOD:
+def run(self, image: np.ndarray) -> LedgerDocument:
+    """
+    Execute complete extraction pipeline.
+    
+    Args:
+        image: RGB numpy array (H, W, 3)
+    
+    Returns:
+        LedgerDocument: Structured ledger with transactions
+    
+    Pipeline Flow:
+        1. Preprocess
+        2. Detect
+        3. Recognize
+        4. Reconstruct
+        5. Apply Rules
+        6. Validate
+        7. Return
+    """
+
+---
+
+PIPELINE STAGES:
+
+STAGE 1: PREPROCESSING
+    - Call: preprocessing.image_loader.load(image)
+    - Call: preprocessing.normalizer.normalize(image)
+    - Output: Normalized image ready for detection
+
+STAGE 2: DETECTION
+    - Call: self.detector.detect(normalized_image)
+    - Output: List of bounding boxes with coordinates and confidence
+    - Filter: Remove boxes with confidence < config.detection_threshold
+    - Sort: Top-to-bottom, left-to-right (critical for row order)
+
+STAGE 3: CROPPING
+    - Call: preprocessing.cropper.extract_regions(image, bounding_boxes)
+    - Output: List of cropped line images
+    - Preserve: Spatial ordering and alignment
+
+STAGE 4: RECOGNITION
+    - Call: self.recognizer.recognize_batch(cropped_images)
+    - Output: List of RecognitionResult (text + confidence)
+    - Filter: Remove results with confidence < config.recognition_threshold
+
+STAGE 5: ROW RECONSTRUCTION
+    - Call: _reconstruct_table_rows(recognized_texts, bounding_boxes)
+    - Logic:
+        * Group texts by Y-coordinate (same row)
+        * Sort texts within row by X-coordinate (left to right)
+        * Identify columns: Date | Description | Debit | Credit | Balance
+        * Merge multi-line descriptions
+    - Output: List of raw table rows
+
+STAGE 6: APPLY RULES
+    - Call: rules_engine.ledger_rules.parse_transactions(raw_rows)
+    - Output: List of Transaction objects
+    - Transforms: Text → structured data (dates, amounts, categories)
+
+STAGE 7: VALIDATION
+    - Call: rules_engine.validators.validate_transactions(transactions)
+    - Checks: Date formats, numeric values, balance consistency
+    - Flags: Invalid or suspicious transactions
+
+STAGE 8: CONFIDENCE SCORING
+    - Call: rules_engine.confidence.compute_confidence(transactions, recognitions)
+    - Output: Document-level confidence score
+    - Combines: Detection confidence + Recognition confidence + Validation success
+
+STAGE 9: RETURN
+    - Build: schemas.LedgerDocument
+    - Include: Transactions, metadata, confidence, warnings
+    - Return: LedgerDocument object
+
+---
+
+HELPER METHODS:
+
+def _reconstruct_table_rows(texts, boxes) -> List[TableRow]:
+    """
+    Reconstruct table structure from detected texts.
+    
+    Algorithm:
+    1. Group boxes by Y-coordinate proximity (± 10 pixels = same row)
+    2. Sort boxes within each row by X-coordinate
+    3. Identify column positions from first few rows
+    4. Assign each text to appropriate column
+    5. Handle multi-line cells (merge if bbox overlaps vertically)
+    """
+
+def _assign_columns(texts, positions) -> List[ColumnAssignment]:
+    """
+    Determine which column each text belongs to.
+    
+    Heuristics:
+    - Date column: leftmost, contains DD/MM/YYYY pattern
+    - Balance column: rightmost, numeric with currency
+    - Debit/Credit: middle columns, numeric
+    - Description: fills remaining space
+    """
+
+---
+
+ERROR HANDLING:
+
+At each stage:
+- Try operation
+- Catch exceptions
+- Log error with stage name and input data
+- Decide: Fail fast OR continue with partial results
+- Return: PipelineError with detailed failure info
+
+Example:
+try:
+    bboxes = self.detector.detect(image)
+except DetectionError as e:
+    logger.error(f"Detection failed: {e}")
+    if config.fail_on_detection_error:
+        raise PipelineError("Detection stage failed", stage="detection")
+    else:
+        bboxes = []  # Continue with empty results
+
+---
+
+LOGGING:
+
+Log at each stage:
+- Stage name
+- Input dimensions
+- Output count (e.g., "Detected 45 text regions")
+- Processing time
+- Confidence scores
+- Warnings (e.g., "Low confidence on 3 transactions")
+
+---
+
+DETERMINISM REQUIREMENTS:
+
+MUST BE DETERMINISTIC:
+- Same image → Same output (every time)
+- No randomness in sorting, filtering, or processing
+- Use fixed seeds if any stochastic operations
+
+REPRODUCIBILITY:
+- Save config with each result
+- Log all parameters used
+- Enable replay with same inputs
+
+---
+
+PERFORMANCE:
+
+Target: < 5 seconds for single-page statement
+- Detection: ~1s
+- Recognition: ~2s (batch processing)
+- Rules: ~0.5s
+- Validation: ~0.5s
+- Overhead: ~1s
+
+Optimization:
+- Batch recognition calls (process all crops at once)
+- Cache model loading (don't reload on each call)
+- Async stages if possible (preprocess next image while recognizing current)
+
+---
+
+OUTPUT STRUCTURE:
+
+LedgerDocument {
+    transactions: List[Transaction]
+    metadata: {
+        page_count: int
+        total_transactions: int
+        date_range: (start_date, end_date)
+        currency: str
+        processing_time: float
+    }
+    confidence: float
+    warnings: List[str]
+    debug_info: {
+        detection_boxes: List[BoundingBox]  (if config.include_debug)
+        raw_recognitions: List[str]
+        failed_validations: List[ValidationError]
+    }
+}
+
+---
+
+USAGE EXAMPLE:
+
+# Created by orchestrator
+detector = PaddleDetector(config)
+recognizer = TrOCRRecognizer(config)
+
+# Initialize pipeline
+pipeline = ExtractionPipeline(
+    detector=detector,
+    recognizer=recognizer,
+    config=config
+)
+
+# Run extraction
+image = cv2.imread("statement.jpg")
+result = pipeline.run(image)
+
+# Access results
+for transaction in result.transactions:
+    print(transaction.date, transaction.amount)
+"""

@@ -1,0 +1,249 @@
+PADDLEOCR VENDOR INTEGRATION
+
+PURPOSE:
+========
+PaddleOCR provides text detection models for the SDK.
+It's vendored (included locally) to:
+- Avoid version conflicts
+- Ensure stability
+- Control updates
+
+This is a FROZEN DEPENDENCY - do not modify PaddleOCR code.
+
+INSTALLATION OPTIONS:
+=====================
+
+OPTION 1: Clone PaddleOCR Repository (Recommended for Production)
+------------------------------------------------------------------
+```bash
+cd SDK/vendor/
+
+# Clone official repository
+git clone https://github.com/PaddlePaddle/PaddleOCR.git
+
+# Checkout stable version
+cd PaddleOCR
+git checkout release/2.7.3  # Use specific stable release
+
+# Verify structure
+ls ppocr/  # Should see data/, modeling/, utils/, etc.
+```
+
+OPTION 2: Install as Python Package (For Development)
+------------------------------------------------------
+```bash
+pip install paddleocr==2.7.3
+pip install paddlepaddle==2.5.2  # CPU version
+# OR
+pip install paddlepaddle-gpu==2.5.2  # GPU version
+
+# Note: This installs globally, not in vendor/
+# SDK will import from site-packages
+```
+
+REQUIRED PADDLEOCR STRUCTURE:
+=============================
+```
+vendor/PaddleOCR/
+├── ppocr/                    ← Core OCR code
+│   ├── __init__.py
+│   ├── data/                 ← Data loading
+│   ├── modeling/             ← Model architectures
+│   │   ├── architectures/
+│   │   ├── backbones/
+│   │   ├── heads/
+│   │   └── transforms/
+│   ├── losses/               ← Loss functions
+│   ├── optimizer/            ← Optimizers
+│   ├── postprocess/          ← Post-processing
+│   └── utils/                ← Utilities
+├── tools/                    ← Inference tools
+│   ├── infer/
+│   │   ├── predict_det.py    ← Detection inference
+│   │   └── predict_rec.py    ← Recognition inference
+│   └── ...
+├── deploy/                   ← Deployment tools
+└── README.md
+```
+
+DOWNLOAD PRETRAINED MODELS:
+============================
+
+PaddleOCR detection model for English:
+
+```bash
+cd SDK/vendor/PaddleOCR/
+
+# Create models directory
+mkdir -p inference_models/
+
+# Download English detection model
+wget https://paddleocr.bj.bcebos.com/PP-OCRv4/english/en_PP-OCRv4_det_infer.tar
+tar -xf en_PP-OCRv4_det_infer.tar -C inference_models/
+
+# Download English recognition model (optional - we use TrOCR)
+wget https://paddleocr.bj.bcebos.com/PP-OCRv4/english/en_PP-OCRv4_rec_infer.tar
+tar -xf en_PP-OCRv4_rec_infer.tar -C inference_models/
+
+# Verify files
+ls inference_models/en_PP-OCRv4_det_infer/
+# Should see: inference.pdmodel, inference.pdiparams, inference.pdiparams.info
+```
+
+EXPECTED MODEL FILES:
+=====================
+```
+inference_models/
+├── en_PP-OCRv4_det_infer/
+│   ├── inference.pdmodel        ← Model architecture (~3MB)
+│   ├── inference.pdiparams      ← Model weights (~47MB)
+│   └── inference.pdiparams.info ← Parameter info
+└── en_PP-OCRv4_rec_infer/       ← Optional (we use TrOCR instead)
+    ├── inference.pdmodel
+    ├── inference.pdiparams
+    └── inference.pdiparams.info
+```
+
+SDK INTEGRATION:
+================
+
+The SDK imports PaddleOCR like this:
+
+```python
+# In SDK/ocr/detection/paddle_detector.py
+
+import sys
+import os
+
+# Add PaddleOCR to Python path
+paddle_path = os.path.join(os.path.dirname(__file__), "../../../vendor/PaddleOCR")
+sys.path.insert(0, paddle_path)
+
+# Now can import PaddleOCR modules
+from ppocr.utils.utility import get_image_file_list
+from ppocr.utils.logging import get_logger
+from tools.infer.predict_det import TextDetector
+```
+
+VERIFICATION:
+=============
+
+Test PaddleOCR installation:
+
+```python
+import sys
+sys.path.insert(0, "SDK/vendor/PaddleOCR")
+
+try:
+    from ppocr.utils.utility import check_and_read_gif
+    from tools.infer.predict_det import TextDetector
+    print("✅ PaddleOCR imported successfully!")
+except ImportError as e:
+    print(f"❌ PaddleOCR import failed: {e}")
+
+# Test detection
+import cv2
+detector = TextDetector({
+    "det_model_dir": "SDK/vendor/PaddleOCR/inference_models/en_PP-OCRv4_det_infer",
+    "use_gpu": False
+})
+
+img = cv2.imread("test_image.jpg")
+boxes, _ = detector(img)
+print(f"Detected {len(boxes)} text regions")
+```
+
+DEPENDENCIES:
+=============
+
+PaddlePaddle installation:
+
+```bash
+# CPU version
+pip install paddlepaddle==2.5.2
+
+# GPU version (CUDA 11.x)
+pip install paddlepaddle-gpu==2.5.2
+
+# GPU version (CUDA 12.x)
+pip install paddlepaddle-gpu==2.5.2 -f https://www.paddlepaddle.org.cn/whl/linux/cudnn84-cudnn_8.4/cu120/paddlepaddle-gpu/paddlepaddle_gpu-2.5.2-cp38-cp38-linux_x86_64.whl
+```
+
+Other dependencies (auto-installed with paddleocr):
+- opencv-python
+- shapely
+- pyclipper
+- lmdb
+- tqdm
+
+VERSION COMPATIBILITY:
+======================
+
+Tested combinations:
+- PaddleOCR: v2.7.3
+- PaddlePaddle: v2.5.2
+- Python: 3.8 - 3.11
+- CUDA: 11.2+ (for GPU version)
+
+IMPORTANT NOTES:
+================
+
+1. **Do NOT modify PaddleOCR code**
+   - Keep as frozen dependency
+   - Any modifications make updates difficult
+
+2. **Version pinning**
+   - Use specific git tag/commit
+   - Document version in requirements.txt
+
+3. **Model updates**
+   - Test thoroughly before updating models
+   - Keep old models as fallback
+
+4. **Path management**
+   - Always use relative paths to vendor/PaddleOCR
+   - Don't rely on system-installed paddleocr
+
+5. **Git management**
+   - Consider using git submodule:
+     ```bash
+     cd SDK/vendor/
+     git submodule add https://github.com/PaddlePaddle/PaddleOCR.git
+     git submodule update --init --recursive
+     ```
+
+6. **Large files**
+   - Use git LFS for model files (>50MB)
+   - Or download models at runtime (not recommended for production)
+
+ALTERNATIVE MODELS:
+===================
+
+If English models don't work well:
+
+Multi-language model:
+```bash
+wget https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar
+```
+
+Server-side model (higher accuracy):
+```bash
+wget https://paddleocr.bj.bcebos.com/PP-OCRv3/english/en_PP-OCRv3_det_server_infer.tar
+```
+
+TROUBLESHOOTING:
+================
+
+Issue: "No module named 'paddle'"
+Solution: Install paddlepaddle: `pip install paddlepaddle`
+
+Issue: Import errors from ppocr
+Solution: Verify path is correct, check PaddleOCR structure
+
+Issue: Model loading fails
+Solution: Re-download models, verify file integrity
+
+Issue: CUDA errors
+Solution: Match CUDA version with paddlepaddle-gpu version
+
+For more help: https://github.com/PaddlePaddle/PaddleOCR/blob/release/2.7/README.md

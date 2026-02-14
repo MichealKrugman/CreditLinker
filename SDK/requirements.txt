@@ -1,0 +1,44 @@
+# Core Dependencies
+numpy>=1.21.0,<2.0.0
+opencv-python>=4.5.0,<5.0.0
+Pillow>=9.0.0,<11.0.0
+
+# OCR Engines
+onnxruntime>=1.12.0,<2.0.0  # Use onnxruntime-gpu for GPU support
+pytesseract>=0.3.9,<1.0.0
+
+# PaddlePaddle (for detection)
+paddlepaddle>=2.5.0,<3.0.0  # CPU version
+# paddlepaddle-gpu>=2.5.0,<3.0.0  # Uncomment for GPU version
+
+# Data Validation
+pydantic>=2.0.0,<3.0.0
+
+# API Framework
+fastapi>=0.100.0,<1.0.0
+uvicorn[standard]>=0.22.0,<1.0.0
+python-multipart>=0.0.6,<1.0.0
+
+# Configuration
+pyyaml>=6.0,<7.0
+python-dotenv>=1.0.0,<2.0.0
+
+# Date/Time Handling
+python-dateutil>=2.8.0,<3.0.0
+
+# Training (optional - only needed for model development)
+# torch>=2.0.0,<3.0.0
+# transformers>=4.30.0,<5.0.0
+# optimum[onnxruntime]>=1.8.0,<2.0.0
+# datasets>=2.12.0,<3.0.0
+
+# Testing (development only)
+pytest>=7.0.0,<8.0.0
+pytest-cov>=4.0.0,<5.0.0
+pytest-asyncio>=0.21.0,<1.0.0
+
+# Logging
+loguru>=0.7.0,<1.0.0
+
+# Utilities
+tqdm>=4.65.0,<5.0.0

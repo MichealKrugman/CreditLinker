@@ -1,0 +1,169 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// USER & BUSINESS MODELS
+// ============================================================================
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  businesses Business[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model Business {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  type      String   @default("PHARMACY") // PHARMACY, WHOLESALE, RETAIL
+  phone     String?
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  imports           Import[]
+  calculatedMetrics CalculatedMetrics[]
+  identityScores    IdentityScore[]
+
+  @@index([userId])
+  @@map("businesses")
+}
+
+// ============================================================================
+// IMPORT & TRANSACTION MODELS
+// ============================================================================
+
+model Import {
+  id                    String   @id @default(cuid())
+  businessId            String
+  fileName              String
+  fileSize              Int
+  filePath              String
+  status                ImportStatus @default(PENDING)
+  totalTransactions     Int          @default(0)
+  processedTransactions Int          @default(0)
+  errorMessage          String?
+  uploadedAt            DateTime     @default(now())
+  processedAt           DateTime?
+
+  // Relations
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  transactions Transaction[]
+
+  @@index([businessId])
+  @@index([status])
+  @@index([uploadedAt])
+  @@map("imports")
+}
+
+enum ImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model Transaction {
+  id          String              @id @default(cuid())
+  importId    String
+  date        DateTime
+  description String
+  amount      Float
+  type        TransactionType
+  category    TransactionCategory @default(UNCATEGORIZED)
+  createdAt   DateTime            @default(now())
+
+  // Relations
+  import Import @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([importId])
+  @@index([date])
+  @@index([category])
+  @@index([type])
+  @@map("transactions")
+}
+
+enum TransactionType {
+  CREDIT
+  DEBIT
+}
+
+enum TransactionCategory {
+  INCOME
+  EXPENSE_INVENTORY
+  EXPENSE_OPERATIONAL
+  EXPENSE_SALARY
+  EXPENSE_UTILITIES
+  EXPENSE_OTHER
+  TRANSFER
+  FEE
+  UNCATEGORIZED
+}
+
+// ============================================================================
+// METRICS & SCORING MODELS
+// ============================================================================
+
+model CalculatedMetrics {
+  id                    String   @id @default(cuid())
+  businessId            String
+  month                 DateTime // First day of the month
+  totalRevenue          Float
+  totalExpenses         Float
+  netCashflow           Float
+  averageBalance        Float
+  revenueGrowth         Float? // Percentage growth from previous month
+  expenseVolatility     Float // Standard deviation of expenses
+  numberOfTransactions  Int
+  createdAt             DateTime @default(now())
+
+  // Relations
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, month])
+  @@index([businessId])
+  @@index([month])
+  @@map("calculated_metrics")
+}
+
+model IdentityScore {
+  id                  String   @id @default(cuid())
+  businessId          String
+  month               DateTime // First day of the month
+  totalScore          Float // 0-100
+  positivityScore     Float // 0-100 (30% weight)
+  stabilityScore      Float // 0-100 (20% weight)
+  growthScore         Float // 0-100 (20% weight)
+  expenseControlScore Float // 0-100 (15% weight)
+  bufferScore         Float // 0-100 (15% weight)
+  createdAt           DateTime @default(now())
+
+  // Relations
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, month])
+  @@index([businessId])
+  @@index([month])
+  @@index([totalScore])
+  @@map("identity_scores")
+}

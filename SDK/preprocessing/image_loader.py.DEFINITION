@@ -1,0 +1,353 @@
+"""
+FILE: preprocessing/image_loader.py
+PURPOSE: Universal image input handler for the SDK
+
+RESPONSIBILITY:
+Load images from multiple sources and normalize to standard format (RGB numpy array).
+Handle various file formats, corrupted data, and multi-page PDFs.
+
+================================================================================
+DEPENDENCIES
+================================================================================
+import numpy as np
+from PIL import Image
+import cv2
+import io
+import base64
+from pathlib import Path
+from typing import Dict, List, Union
+import fitz  # PyMuPDF for PDF handling
+
+pip install: Pillow opencv-python PyMuPDF
+
+================================================================================
+CLASS: ImageLoader
+================================================================================
+
+class ImageLoader:
+    \"\"\"Load images from various sources and normalize formats.\"\"\"
+    
+    SUPPORTED_FORMATS = ['jpeg', 'jpg', 'png', 'tiff', 'tif', 'bmp', 'pdf']
+    
+    def __init__(self):
+        pass
+
+================================================================================
+METHODS TO IMPLEMENT
+================================================================================
+
+1. load_from_path(file_path: str) -> Dict:
+    \"\"\"
+    Load image from filesystem path.
+    
+    Args:
+        file_path: Path to image file
+    
+    Returns:
+        {
+            "image": np.ndarray,  # RGB (H, W, 3) uint8
+            "metadata": {
+                "format": str,         # "JPEG", "PNG", etc.
+                "dpi": int,            # Dots per inch
+                "width": int,          # Original width
+                "height": int,         # Original height
+                "color_space": str,    # "RGB", "RGBA", "L"
+                "source": "file"
+            }
+        }
+    
+    Process:
+    - Check file exists
+    - Detect format using extension and magic bytes
+    - If PDF: extract first page as image
+    - Load using PIL or cv2
+    - Convert to RGB
+    - Extract DPI from metadata
+    - Return standardized dict
+    
+    Error Handling:
+    - FileNotFoundError: File doesn't exist
+    - ValueError: Unsupported format
+    - IOError: Corrupted file
+    \"\"\"
+
+2. load_from_bytes(data: bytes, format_hint: str = None) -> Dict:
+    \"\"\"
+    Load image from raw bytes.
+    
+    Args:
+        data: Image data as bytes
+        format_hint: Optional format hint ("jpeg", "png")
+    
+    Returns:
+        Same as load_from_path()
+    
+    Process:
+    - Auto-detect format from magic bytes if no hint
+    - Use io.BytesIO to create file-like object
+    - Load with PIL
+    - Convert to RGB numpy
+    - Return standardized dict
+    
+    Magic Bytes Detection:
+    - JPEG: FF D8 FF
+    - PNG: 89 50 4E 47
+    - PDF: 25 50 44 46
+    \"\"\"
+
+3. load_from_pil(pil_image: Image.Image) -> Dict:
+    \"\"\"
+    Load from PIL Image object.
+    
+    Args:
+        pil_image: PIL Image instance
+    
+    Returns:
+        Same as load_from_path()
+    
+    Process:
+    - Convert to RGB (handle RGBA, L, CMYK)
+    - Convert to numpy array
+    - Extract metadata from PIL info
+    - Return standardized dict
+    \"\"\"
+
+4. load_from_base64(base64_string: str) -> Dict:
+    \"\"\"
+    Load from base64 encoded string.
+    
+    Args:
+        base64_string: Base64 encoded image data
+    
+    Returns:
+        Same as load_from_path()
+    
+    Process:
+    - Decode base64 to bytes
+    - Call load_from_bytes()
+    \"\"\"
+
+5. load_pdf_pages(pdf_path: str) -> List[Dict]:
+    \"\"\"
+    Extract all pages from PDF as images.
+    
+    Args:
+        pdf_path: Path to PDF file
+    
+    Returns:
+        List of dicts (one per page), same format as load_from_path()
+    
+    Process:
+    - Open PDF with PyMuPDF
+    - For each page:
+      * Render to pixmap (DPI=300)
+      * Convert to numpy RGB
+      * Add page_number to metadata
+    - Return list of standardized dicts
+    \"\"\"
+
+6. extract_metadata(image_source: Union[str, bytes, Image.Image]) -> Dict:
+    \"\"\"
+    Extract only metadata without loading full image.
+    
+    Args:
+        image_source: Path, bytes, or PIL Image
+    
+    Returns:
+        Metadata dict only
+    
+    Use Case:
+    - Quick validation before loading
+    - Batch file analysis
+    \"\"\"
+
+7. _detect_format(data: bytes) -> str:
+    \"\"\"
+    Detect image format from magic bytes.
+    
+    Args:
+        data: First few bytes of file
+    
+    Returns:
+        Format string: "jpeg", "png", "pdf", etc.
+    
+    Magic Bytes:
+    - JPEG: data[:3] == b'\\xff\\xd8\\xff'
+    - PNG: data[:8] == b'\\x89PNG\\r\\n\\x1a\\n'
+    - PDF: data[:4] == b'%PDF'
+    - TIFF: data[:4] in [b'II*\\x00', b'MM\\x00*']
+    - BMP: data[:2] == b'BM'
+    \"\"\"
+
+8. _pil_to_numpy(pil_image: Image.Image) -> np.ndarray:
+    \"\"\"
+    Convert PIL Image to RGB numpy array.
+    
+    Args:
+        pil_image: PIL Image (any mode)
+    
+    Returns:
+        RGB numpy array (H, W, 3) uint8
+    
+    Process:
+    - Convert to RGB if needed (from RGBA, L, CMYK, etc.)
+    - np.array(pil_image)
+    - Ensure uint8 dtype
+    \"\"\"
+
+================================================================================
+ERROR HANDLING
+================================================================================
+
+Define custom exceptions:
+
+class ImageLoadError(Exception):
+    \"\"\"Base exception for image loading errors.\"\"\"
+    pass
+
+class UnsupportedFormatError(ImageLoadError):
+    \"\"\"Unsupported image format.\"\"\"
+    pass
+
+class CorruptedImageError(ImageLoadError):
+    \"\"\"Image file is corrupted.\"\"\"
+    pass
+
+Usage:
+try:
+    result = loader.load_from_path("image.jpg")
+except FileNotFoundError:
+    print("File not found")
+except CorruptedImageError:
+    print("File is corrupted")
+except UnsupportedFormatError:
+    print("Format not supported")
+
+================================================================================
+USAGE EXAMPLE
+================================================================================
+
+from preprocessing.image_loader import ImageLoader
+
+loader = ImageLoader()
+
+# From file
+result = loader.load_from_path("statement.jpg")
+image = result["image"]  # numpy array (H, W, 3)
+print(f"Loaded {result['metadata']['format']} image")
+print(f"Size: {result['metadata']['width']}x{result['metadata']['height']}")
+
+# From bytes
+with open("statement.jpg", "rb") as f:
+    data = f.read()
+result = loader.load_from_bytes(data)
+
+# From PDF (multi-page)
+pages = loader.load_pdf_pages("statement.pdf")
+for i, page_data in enumerate(pages):
+    print(f"Page {i+1}: {page_data['image'].shape}")
+
+# From base64
+b64_string = "data:image/jpeg;base64,/9j/4AAQSkZJRg..."
+result = loader.load_from_base64(b64_string)
+
+================================================================================
+TESTING CHECKLIST
+================================================================================
+
+Unit tests to write:
+
+1. test_load_jpeg()
+   - Load valid JPEG
+   - Verify RGB output
+   - Check metadata
+
+2. test_load_png()
+   - Load PNG with transparency
+   - Verify RGBA → RGB conversion
+
+3. test_load_pdf_single_page()
+   - Extract from 1-page PDF
+   - Verify image quality
+
+4. test_load_pdf_multi_page()
+   - Extract all pages
+   - Verify page count matches
+
+5. test_corrupted_file()
+   - Try loading corrupted image
+   - Verify CorruptedImageError raised
+
+6. test_unsupported_format()
+   - Try loading .gif or .svg
+   - Verify UnsupportedFormatError raised
+
+7. test_file_not_found()
+   - Try non-existent path
+   - Verify FileNotFoundError raised
+
+8. test_base64_decode()
+   - Load from base64 string
+   - Verify output matches original
+
+9. test_format_detection()
+   - Test magic bytes detection
+   - Verify correct format identified
+
+================================================================================
+IMPLEMENTATION NOTES
+================================================================================
+
+1. **DPI Handling**:
+   - Default to 300 DPI if not in metadata
+   - Use PIL.Image.info['dpi'] when available
+
+2. **Color Space Conversion**:
+   - Always output RGB (3 channels)
+   - RGBA → RGB: Remove alpha, composite on white
+   - L (grayscale) → RGB: Duplicate channel
+   - CMYK → RGB: Use PIL.convert('RGB')
+
+3. **PDF Rendering**:
+   - Use PyMuPDF (fitz) for best quality
+   - Render at 300 DPI minimum
+   - matrix = fitz.Matrix(300/72, 300/72)  # 72 is default DPI
+
+4. **Memory Efficiency**:
+   - For large PDFs, consider generator pattern:
+     def load_pdf_pages_generator(pdf_path):
+         for page in pages:
+             yield process_page(page)
+
+5. **Base64 Handling**:
+   - Strip data URI prefix: "data:image/jpeg;base64,"
+   - Handle with/without padding
+
+================================================================================
+INTEGRATION POINTS
+================================================================================
+
+Called by:
+- core/pipeline.py (Stage 1: Preprocessing)
+- api/routes.py (File upload handling)
+
+Calls:
+- (None - this is leaf module)
+
+Output used by:
+- preprocessing/normalizer.py (takes numpy array)
+- preprocessing/cropper.py (takes numpy array)
+
+================================================================================
+PERFORMANCE CONSIDERATIONS
+================================================================================
+
+- Typical load time: 50-100ms per image
+- PDF extraction: 200-500ms per page
+- Memory: ~3x file size during loading (PIL internal buffers)
+- Optimization: Cache loaded images if processing multiple times
+
+================================================================================
+END OF DEFINITION
+================================================================================
+"""

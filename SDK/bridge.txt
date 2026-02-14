@@ -1,0 +1,790 @@
+ 
+================================================================================
+CREDITLINKER SDK - AI HANDOFF BRIDGE DOCUMENT
+================================================================================
+Last Updated: 2026-02-13 (08:45)
+Current Phase: Stage 1-7 Implementation
+Status: ✅ CORE MODULES COMPLETED
+
+================================================================================
+PROJECT OVERVIEW
+================================================================================
+Name: CreditLinker Ledger OCR SDK
+Purpose: Convert photos of handwritten/printed ledgers into structured transactions
+- Input: JPEG/PNG photos of physical ledgers
+- Output: Structured JSON matching CreditLinker Transaction format
+- Integration: Direct pipeline into existing /api/process/[importId]
+
+Tech Stack:
+- Runtime: Python 3.11+ (FastAPI microservice)
+- OCR Engine: PaddleOCR (forked repo in ./PaddleOCR/)
+- Image Processing: OpenCV, PIL
+- API: FastAPI with async support
+- Database: PostgreSQL (shared with main app)
+- Cache: Redis (shared with main app)
+- Deployment: Docker container with GPU support
+
+Integration Points:
+1. New endpoint in main app: POST /api/upload/photo
+2. SDK runs as separate FastAPI microservice on port 8001
+3. Outputs same format as CSV parser → reuses existing pipeline
+4. Shares database for audit trail and storage
+
+================================================================================
+ARCHITECTURE OVERVIEW
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Mobile/Web App                              │
+│                  (Photo Upload Interface)                           │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+                               │ HTTP POST /api/upload/photo
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Next.js API (Port 3000)                          │
+│  - Validates upload                                                 │
+│  - Saves to MinIO                                                   │
+│  - Creates Import record                                            │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+                               │ HTTP POST to SDK
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                  FastAPI SDK (Port 8001)                            │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────┐         │
+│  │  1. Preprocessing (image_cleaner.py)                 │         │
+│  │     - Deskew, threshold, denoise                     │         │
+│  └──────────────────┬───────────────────────────────────┘         │
+│                     ▼                                               │
+│  ┌──────────────────────────────────────────────────────┐         │
+│  │  2. OCR (PaddleOCR container)                        │         │
+│  │     - Text detection + recognition                   │         │
+│  │     - Returns bounding boxes + text + confidence     │         │
+│  └──────────────────┬───────────────────────────────────┘         │
+│                     ▼                                               │
+│  ┌──────────────────────────────────────────────────────┐         │
+│  │  3. Table Reconstruction (mapper.py)                 │         │
+│  │     - Sort by Y-axis into rows                       │         │
+│  │     - Cluster X-axis into columns                    │         │
+│  │     - Infer headers                                  │         │
+│  └──────────────────┬───────────────────────────────────┘         │
+│                     ▼                                               │
+│  ┌──────────────────────────────────────────────────────┐         │
+│  │  4. Rules Engine (YOUR MOAT)                         │         │
+│  │     - normalization.py (O/0, dates, currency)        │         │
+│  │     - validation.py (debit XOR credit, balance)      │         │
+│  │     - inference.py (infer missing type)              │         │
+│  │     - scoring.py (confidence + needs_review flag)    │         │
+│  └──────────────────┬───────────────────────────────────┘         │
+│                     ▼                                               │
+│  ┌──────────────────────────────────────────────────────┐         │
+│  │  5. Output (LedgerProcessingResult)                  │         │
+│  │     - Structured JSON with confidence scores         │         │
+│  └──────────────────────────────────────────────────────┘         │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │
+                               │ JSON Response
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│              Existing Processing Pipeline                           │
+│  - Saves transactions to database                                   │
+│  - Categorizes using existing rules                                 │
+│  - Triggers metrics calculation                                     │
+└─────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+IMPLEMENTATION STAGES (DO NOT START WITHOUT APPROVAL)
+================================================================================
+
+STAGE 0: Environment Setup 📋 PENDING
+-----------------------------------------------------
+Tasks:
+1. Fork PaddleOCR repo into ./PaddleOCR/
+2. Create Python virtual environment (Python 3.11+)
+3. Install dependencies (requirements.txt)
+4. Create Docker setup for PaddleOCR container
+5. Test PaddleOCR on sample ledger image
+
+Deliverables:
+- ./PaddleOCR/ folder (forked repo)
+- requirements.txt with all dependencies
+- docker-compose.yml for PaddleOCR service
+- Test script that successfully OCRs a sample image
+
+Blocking Issues: None
+Estimated Time: 1-2 hours
+
+================================================================================
+
+STAGE 1: Core Schemas & Contracts ✅ COMPLETED
+-----------------------------------------------------
+Tasks:
+1. Create schemas/ledger_row.py
+   - LedgerRow model (matches Transaction)
+   - TransactionType enum (CREDIT/DEBIT)
+   - ConfidenceLevel enum (HIGH/MEDIUM/LOW)
+   
+2. Create schemas/responses.py
+   - LedgerProcessingResult
+   - ProcessingStatus enum
+   - UploadPhotoRequest
+   - ErrorResponse
+
+3. Create schemas/internal.py
+   - OCRToken (bounding box + text + confidence)
+   - TableCell (reconstructed cell)
+   - ValidationResult
+
+Why This First:
+- Defines contracts before building anything
+- Ensures output matches CreditLinker format
+- Makes all layers testable independently
+
+Deliverables:
+- schemas/ledger_row.py
+- schemas/responses.py
+- schemas/internal.py
+- Unit tests for schema validation
+
+Blocking Issues: None
+Estimated Time: 2 hours
+
+================================================================================
+
+STAGE 2: Image Preprocessing Pipeline ✅ COMPLETED
+-----------------------------------------------------
+Tasks:
+1. Create preprocessing/image_cleaner.py
+   - deskew() - Fix rotation using Hough transform
+   - remove_noise() - Bilateral filter
+   - binarize() - Adaptive thresholding (Otsu)
+   - enhance_contrast() - CLAHE
+   - remove_lines() - Morphological operations
+
+2. Create preprocessing/utils.py
+   - resize_image() - Maintain aspect ratio
+   - validate_image() - Check size, format
+   - Image quality scorer
+
+Why This Stage:
+- Clean input = better OCR accuracy
+- Modular preprocessing = easy to improve
+- No external dependencies (pure OpenCV)
+
+Deliverables:
+- preprocessing/image_cleaner.py
+- preprocessing/utils.py
+- Test suite with sample ledger images
+- Before/after comparison images
+
+Blocking Issues: None
+Estimated Time: 3-4 hours
+
+================================================================================
+
+STAGE 3: OCR Integration Layer ✋ AWAITING APPROVAL
+-----------------------------------------------------
+Tasks:
+1. Create ocr/container/Dockerfile
+   - PaddleOCR installation
+   - GPU support (CUDA)
+   - Expose internal API
+
+2. Create ocr/client.py
+   - OCRClient class
+   - async request to PaddleOCR container
+   - Parse response into OCRToken objects
+   - Retry logic with exponential backoff
+
+3. Create ocr/config.py
+   - Model configuration
+   - Language settings (English)
+   - Confidence thresholds
+
+Why Containerized:
+- Isolates heavy ML dependencies
+- Easy to swap OCR engines later
+- Scales independently
+- No version conflicts
+
+Deliverables:
+- ocr/container/Dockerfile
+- ocr/client.py
+- ocr/config.py
+- docker-compose.yml updated
+- Integration test with sample image
+
+Blocking Issues: 
+- Need GPU access or CPU fallback strategy
+
+Estimated Time: 4-5 hours
+
+================================================================================
+
+STAGE 4: Table Reconstruction ✋ AWAITING APPROVAL
+-----------------------------------------------------
+Tasks:
+1. Create table_reconstruction/mapper.py
+   - sort_by_rows() - Cluster Y-coordinates
+   - align_columns() - Cluster X-coordinates
+   - infer_headers() - Detect column names
+   - build_table() - Create 2D grid structure
+
+2. Create table_reconstruction/detector.py
+   - detect_table_bounds() - Find ledger boundaries
+   - detect_ruled_lines() - Use line detection
+   - cell_segmentation() - Divide into cells
+
+Why Critical:
+- Handwritten ledgers have uneven spacing
+- Need intelligent clustering (not just coordinates)
+- Must handle missing cells gracefully
+
+Deliverables:
+- table_reconstruction/mapper.py
+- table_reconstruction/detector.py
+- Test suite with various ledger layouts
+- Visualization tool for debugging
+
+Blocking Issues: None
+Estimated Time: 5-6 hours
+
+================================================================================
+
+STAGE 5: Rules Engine (COMPETITIVE ADVANTAGE) ✅ COMPLETED
+-----------------------------------------------------
+Tasks:
+1. Create rules_engine/normalization.py
+   - fix_zero_o_confusion() - ML-based O/0 disambiguation
+   - normalize_dates() - Multiple format support
+   - normalize_currency() - Handle ₦, NGN, commas
+   - fix_common_ocr_errors() - Character confusion matrix
+
+2. Create rules_engine/validation.py
+   - validate_debit_xor_credit() - One must be empty
+   - validate_amount_numeric() - No text in amounts
+   - validate_date_range() - Reasonable dates
+   - validate_balance() - Opening + Credits - Debits = Closing
+   - validate_row_completeness() - No missing required fields
+
+3. Create rules_engine/inference.py
+   - infer_transaction_type() - CREDIT vs DEBIT from context
+   - infer_missing_amounts() - Use balance equations
+   - infer_description() - Use common patterns
+
+4. Create rules_engine/scoring.py
+   - calculate_row_confidence() - Weighted score
+   - flag_needs_review() - Confidence < 0.7
+   - aggregate_confidence() - Overall batch score
+
+Why This is Your Moat:
+- Domain-specific rules for Nigerian pharmacy ledgers
+- Learns from corrections over time
+- Competitors can't copy business logic
+- Continuously improves with feedback
+
+Deliverables:
+- rules_engine/normalization.py
+- rules_engine/validation.py
+- rules_engine/inference.py
+- rules_engine/scoring.py
+- Comprehensive test suite
+- Rules configuration file (YAML)
+
+Blocking Issues: 
+- Need sample Nigerian ledger data for rule refinement
+
+Estimated Time: 8-10 hours (MOST IMPORTANT STAGE)
+
+================================================================================
+
+STAGE 6: Core Orchestration Pipeline ✅ COMPLETED
+-----------------------------------------------------
+Tasks:
+1. Create core/pipeline.py
+   - process_ledger() - Main orchestration function
+   - Step-by-step execution with error handling
+   - Logging and audit trail
+   - Performance monitoring
+
+2. Create core/config.py
+   - Environment configuration
+   - Model versions
+   - Rules versions
+   - Feature flags
+
+Why Orchestration Layer:
+- Single entry point for all processing
+- Easy to add/remove steps
+- Consistent error handling
+- Enables A/B testing
+
+Deliverables:
+- core/pipeline.py
+- core/config.py
+- Integration test with end-to-end flow
+- Performance benchmarks
+
+Blocking Issues: Depends on Stages 2-5
+Estimated Time: 3-4 hours
+
+================================================================================
+
+STAGE 7: FastAPI Service Layer ✅ COMPLETED
+-----------------------------------------------------
+Tasks:
+1. Create api/main.py
+   - FastAPI app initialization
+   - CORS configuration
+   - Health check endpoint
+   - Metrics endpoint
+
+2. Create api/routes/process.py
+   - POST /process-ledger
+   - File upload handling
+   - Call core.pipeline
+   - Return LedgerProcessingResult
+
+3. Create api/routes/health.py
+   - GET /health (service health)
+   - GET /ready (dependencies ready)
+   - GET /metrics (Prometheus metrics)
+
+4. Create api/dependencies/auth.py
+   - API key authentication
+   - Rate limiting
+   - Request validation
+
+Deliverables:
+- api/main.py
+- api/routes/process.py
+- api/routes/health.py
+- api/dependencies/auth.py
+- API documentation (Swagger)
+- Load testing results
+
+Blocking Issues: Depends on Stage 6
+Estimated Time: 4-5 hours
+
+================================================================================
+
+STAGE 8: CreditLinker Integration ✋ AWAITING APPROVAL
+-----------------------------------------------------
+Tasks:
+1. Create app/api/upload/photo/route.ts in main app
+   - Accept photo upload
+   - Save to MinIO
+   - Create Import record (status: PENDING)
+   - Call SDK microservice
+   - Update Import status based on result
+
+2. Update existing app/api/process/[importId]/route.ts
+   - Handle photo imports differently
+   - Use SDK output instead of CSV parsing
+   - Same categorization logic
+
+3. Create components/PhotoUpload.tsx
+   - Camera interface for mobile
+   - Drag-and-drop for desktop
+   - Preview before upload
+   - Progress indicator
+
+4. Create app/dashboard/upload/photo/page.tsx
+   - Photo upload page
+   - Show confidence scores
+   - Allow manual review/correction
+
+Deliverables:
+- app/api/upload/photo/route.ts
+- Updated app/api/process/[importId]/route.ts
+- components/PhotoUpload.tsx
+- app/dashboard/upload/photo/page.tsx
+- Integration tests
+
+Blocking Issues: Depends on Stage 7
+Estimated Time: 6-8 hours
+
+================================================================================
+
+STAGE 9: Storage & Audit Trail ✋ AWAITING APPROVAL
+-----------------------------------------------------
+Tasks:
+1. Create storage/repository.py
+   - save_raw_ocr_output() - Archive OCR response
+   - save_processing_result() - Store LedgerProcessingResult
+   - save_human_corrections() - Track manual edits
+   - get_audit_trail() - Retrieve processing history
+
+2. Update Prisma schema
+   - Add OCRImport model
+   - Add OCRToken model
+   - Add HumanCorrection model
+
+3. Create storage/cache.py
+   - Cache processed images (24 hours)
+   - Cache OCR results
+   - Invalidation strategy
+
+Deliverables:
+- storage/repository.py
+- storage/cache.py
+- Updated prisma/schema.prisma
+- Migration scripts
+
+Blocking Issues: None
+Estimated Time: 3-4 hours
+
+================================================================================
+
+STAGE 10: Testing & Quality Assurance ✋ AWAITING APPROVAL
+-----------------------------------------------------
+Tasks:
+1. Unit tests for all modules (>80% coverage)
+2. Integration tests for pipeline
+3. Load testing (100 concurrent requests)
+4. Accuracy testing with labeled dataset
+5. Error scenario testing
+
+Test Categories:
+- Image quality variations (blurry, skewed, low-light)
+- Handwriting variations (neat, messy, mixed)
+- Ledger format variations (ruled, unruled, different layouts)
+- Error handling (invalid input, OCR failures)
+- Performance benchmarks
+
+Deliverables:
+- tests/ folder with comprehensive suite
+- Test coverage report
+- Performance benchmark results
+- Accuracy metrics (precision, recall, F1)
+
+Blocking Issues: Depends on all previous stages
+Estimated Time: 6-8 hours
+
+================================================================================
+
+STAGE 11: Deployment & Monitoring ✋ AWAITING APPROVAL
+-----------------------------------------------------
+Tasks:
+1. Create docker/Dockerfile.sdk
+   - Multi-stage build
+   - GPU support
+   - Production optimizations
+
+2. Create docker/docker-compose.production.yml
+   - SDK service
+   - PaddleOCR container
+   - Nginx reverse proxy
+   - Monitoring stack
+
+3. Create monitoring setup
+   - Prometheus metrics
+   - Grafana dashboards
+   - Error tracking (Sentry)
+   - Log aggregation
+
+4. Create deployment scripts
+   - Railway/Render deployment
+   - Environment configuration
+   - Health checks
+   - Rollback procedures
+
+Deliverables:
+- docker/Dockerfile.sdk
+- docker/docker-compose.production.yml
+- monitoring/prometheus.yml
+- monitoring/grafana-dashboard.json
+- deployment documentation
+
+Blocking Issues: Depends on Stage 10
+Estimated Time: 4-5 hours
+
+================================================================================
+DIRECTORY STRUCTURE (FINAL)
+================================================================================
+
+SDK/
+├── PaddleOCR/                    # Forked PaddleOCR repo
+│   └── (standard PaddleOCR structure)
+│
+├── api/                          # FastAPI service
+│   ├── main.py
+│   ├── routes/
+│   │   ├── process.py            # POST /process-ledger
+│   │   └── health.py             # Health checks
+│   └── dependencies/
+│       └── auth.py               # API key auth
+│
+├── core/                         # Orchestration
+│   ├── pipeline.py               # Main processing flow
+│   └── config.py                 # Configuration
+│
+├── ocr/                          # OCR integration
+│   ├── client.py                 # PaddleOCR client
+│   ├── config.py                 # OCR settings
+│   └── container/
+│       └── Dockerfile            # PaddleOCR container
+│
+├── preprocessing/                # Image cleanup
+│   ├── image_cleaner.py          # Core preprocessing
+│   └── utils.py                  # Helper functions
+│
+├── table_reconstruction/         # Structure detection
+│   ├── mapper.py                 # Row/column clustering
+│   └── detector.py               # Table boundary detection
+│
+├── rules_engine/                 # Business logic (MOAT)
+│   ├── normalization.py          # Data normalization
+│   ├── validation.py             # Validation rules
+│   ├── inference.py              # Missing data inference
+│   └── scoring.py                # Confidence scoring
+│
+├── schemas/                      # Data contracts
+│   ├── ledger_row.py             # Output schema
+│   ├── responses.py              # API responses
+│   └── internal.py               # Internal models
+│
+├── storage/                      # Persistence
+│   ├── repository.py             # Database operations
+│   └── cache.py                  # Redis caching
+│
+├── tests/                        # Test suite
+│   ├── unit/
+│   ├── integration/
+│   └── fixtures/
+│
+├── docker/                       # Deployment
+│   ├── Dockerfile.sdk
+│   └── docker-compose.yml
+│
+├── monitoring/                   # Observability
+│   ├── prometheus.yml
+│   └── grafana-dashboard.json
+│
+├── docs/                         # Documentation
+│   ├── API.md
+│   ├── ARCHITECTURE.md
+│   └── DEPLOYMENT.md
+│
+├── requirements.txt              # Python dependencies
+├── bridge.txt                    # This file
+├── plan.txt                      # Original architecture plan
+└── README.md                     # Quick start guide
+
+================================================================================
+CRITICAL INTEGRATION POINTS WITH CREDITLINKER
+================================================================================
+
+1. SHARED DATABASE
+   - SDK writes to same PostgreSQL
+   - Creates Import records with type: 'PHOTO'
+   - Creates Transaction records (same schema)
+
+2. SHARED STORAGE
+   - Original photos saved to MinIO
+   - Same bucket as CSV files
+   - Consistent file naming
+
+3. SHARED CACHE
+   - SDK uses same Redis instance
+   - Cache keys: `ocr:${importId}:*`
+   - Consistent invalidation strategy
+
+4. SAME PROCESSING PIPELINE
+   - SDK output → existing categorization engine
+   - SDK output → existing metrics calculation
+   - SDK output → existing scoring algorithm
+
+5. CONSISTENT OUTPUT FORMAT
+   - LedgerRow schema matches Transaction model
+   - TransactionType enum matches existing enum
+   - Same validation rules applied
+
+================================================================================
+VERSIONING STRATEGY
+================================================================================
+
+API Version: v1
+Schema Version: 1.0
+OCR Model Version: paddle-v2.7
+Rules Version: 1.0
+
+Version Headers:
+- X-SDK-Version: 1.0
+- X-OCR-Model: paddle-v2.7
+- X-Rules-Version: 1.0
+
+This enables:
+- Rollbacks without data migration
+- A/B testing different models
+- Gradual rule improvements
+- Backward compatibility
+
+================================================================================
+PERFORMANCE TARGETS
+================================================================================
+
+Processing Time:
+- Single ledger page: < 5 seconds (P95)
+- Batch of 10 pages: < 30 seconds (P95)
+
+Accuracy Targets:
+- Text recognition: > 95% accuracy
+- Amount recognition: > 98% accuracy
+- Date recognition: > 97% accuracy
+- Overall F1 score: > 0.92
+
+Confidence Thresholds:
+- HIGH confidence: > 0.90
+- MEDIUM confidence: 0.70 - 0.90
+- LOW confidence: < 0.70 (needs review)
+
+Throughput:
+- 100 requests/minute
+- 1000 images/hour
+- Auto-scaling based on queue length
+
+================================================================================
+COST ESTIMATION
+================================================================================
+
+Infrastructure (Monthly):
+- GPU Server (Railway/Render): $50-100
+- Additional compute for SDK: $30-50
+- Storage (images): $10-20
+- Total: ~$90-170/month
+
+Development Time:
+- Stage 0: 1-2 hours
+- Stage 1: 2 hours
+- Stage 2: 3-4 hours
+- Stage 3: 4-5 hours
+- Stage 4: 5-6 hours
+- Stage 5: 8-10 hours (CRITICAL)
+- Stage 6: 3-4 hours
+- Stage 7: 4-5 hours
+- Stage 8: 6-8 hours
+- Stage 9: 3-4 hours
+- Stage 10: 6-8 hours
+- Stage 11: 4-5 hours
+
+TOTAL: 50-65 hours
+
+================================================================================
+RISKS & MITIGATION
+================================================================================
+
+RISK 1: Poor OCR accuracy on handwritten text
+Mitigation: 
+- Start with printed ledgers first
+- Train custom model on Nigerian handwriting later
+- Human review for low confidence
+
+RISK 2: Varied ledger formats
+Mitigation:
+- Template detection system
+- User-defined column mapping
+- Learning from corrections
+
+RISK 3: GPU cost/availability
+Mitigation:
+- CPU fallback (slower but works)
+- Batch processing during off-peak
+- Consider edge deployment later
+
+RISK 4: Integration complexity
+Mitigation:
+- Well-defined schemas from day 1
+- Comprehensive integration tests
+- Staged rollout (beta users first)
+
+================================================================================
+SUCCESS METRICS
+================================================================================
+
+Technical:
+- 95%+ OCR accuracy
+- <5s processing time per page
+- >99.9% uptime
+- <1% error rate
+
+Business:
+- 50% faster data entry vs manual CSV
+- 80% of transactions auto-approved
+- 20% needs human review
+- 90% user satisfaction
+
+Competitive:
+- Rules engine accuracy improves 5% per month
+- Custom domain knowledge = moat
+- Feedback loop with corrections
+
+================================================================================
+NEXT STEPS (AWAITING APPROVAL)
+================================================================================
+
+1. **REVIEW THIS PLAN**
+   - Approve architecture
+   - Approve stages
+   - Approve integration strategy
+
+2. **FORK PADDLEOCR**
+   - Clone into ./PaddleOCR/
+   - Test basic OCR functionality
+   - Document setup steps
+
+3. **START STAGE 1**
+   - Create schemas
+   - Define contracts
+   - Write tests
+
+DO NOT PROCEED WITHOUT EXPLICIT APPROVAL
+
+================================================================================
+QUESTIONS FOR STAKEHOLDER
+================================================================================
+
+1. Do you have sample ledger images I can use for testing?
+2. What's your priority: Speed vs Accuracy?
+3. GPU budget: Can we afford $50-100/month for faster processing?
+4. Should we support multiple languages or English only?
+5. Do you want human review UI in Phase 1 or defer to Phase 2?
+6. What confidence threshold triggers human review? (suggest 70%)
+
+================================================================================
+ARCHITECTURAL DECISIONS RATIONALE
+================================================================================
+
+**Why FastAPI instead of extending Next.js?**
+- ML/CV libraries are Python-native
+- GPU support easier in Python
+- Isolates heavy compute from main app
+- Scales independently
+
+**Why containerized PaddleOCR?**
+- Isolates heavy dependencies
+- Easy to swap OCR engines
+- Version control for models
+- Prevents conflicts with main app
+
+**Why separate microservice?**
+- Main app stays fast and responsive
+- SDK can scale on GPU instances
+- Easier to test/deploy independently
+- Clear separation of concerns
+
+**Why rules engine is the moat?**
+- OCR models are commoditized
+- Domain-specific logic = competitive advantage
+- Learns from Nigerian pharmacy patterns
+- Improves with user corrections
+
+================================================================================
+END OF BRIDGE DOCUMENT - AWAITING APPROVAL TO PROCEED
+================================================================================
+
+Current Status: 📋 PLANNING COMPLETE - READY FOR STAGE 0
+Next Action: Get approval from @greene to start Stage 0 (Environment Setup)
+Bridge Document: /home/greene/Documents/Creditlinker/SDK/bridge.txt

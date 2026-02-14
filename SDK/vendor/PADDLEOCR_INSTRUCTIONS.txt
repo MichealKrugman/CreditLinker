@@ -1,0 +1,192 @@
+"""
+PADDLEOCR VENDOR DEPENDENCY - INSTALLATION INSTRUCTIONS
+=========================================================
+
+PURPOSE:
+--------
+PaddleOCR is frozen as a vendor dependency for version stability.
+We don't want upstream changes to break our system.
+
+CURRENT STATUS:
+---------------
+[ ] PaddleOCR/ directory exists but may be empty
+
+INSTALLATION OPTIONS:
+---------------------
+
+OPTION 1: Clone Official Repository (RECOMMENDED)
+--------------------------------------------------
+1. Navigate to vendor directory:
+   ```bash
+   cd SDK/vendor/
+   ```
+
+2. Clone PaddleOCR:
+   ```bash
+   git clone https://github.com/PaddlePaddle/PaddleOCR.git
+   cd PaddleOCR
+   ```
+
+3. Checkout stable version (recommended):
+   ```bash
+   git checkout release/2.7  # Or latest stable release
+   ```
+
+4. Install dependencies:
+   ```bash
+   cd ../..  # Back to SDK root
+   pip install -r vendor/PaddleOCR/requirements.txt
+   ```
+
+OPTION 2: Install via pip (NOT RECOMMENDED for production)
+-----------------------------------------------------------
+```bash
+pip install paddleocr paddlepaddle
+```
+
+Note: This installs to system packages, not vendor/ directory.
+Use only for quick testing, not production deployment.
+
+REQUIRED DEPENDENCIES:
+----------------------
+PaddleOCR requires:
+- paddlepaddle>=2.3.0 or paddlepaddle-gpu>=2.3.0
+- opencv-python
+- Pillow
+- pyyaml
+- attrdict
+- imgaug
+- lmdb
+- tqdm
+- numpy
+
+Install all:
+```bash
+pip install paddlepaddle opencv-python Pillow pyyaml attrdict imgaug lmdb tqdm numpy
+```
+
+For GPU support:
+```bash
+pip install paddlepaddle-gpu  # Instead of paddlepaddle
+```
+
+DOWNLOAD PRE-TRAINED MODELS:
+-----------------------------
+PaddleOCR requires detection and recognition models.
+
+Auto-download (recommended):
+```python
+from paddleocr import PaddleOCR
+
+# First run will download models (~300MB total)
+ocr = PaddleOCR(use_angle_cls=True, lang='en')
+```
+
+Models will be downloaded to:
+~/.paddleocr/ on Linux/Mac
+C:\\Users\\YourName\\.paddleocr\\ on Windows
+
+Manual download:
+1. Visit: https://github.com/PaddlePaddle/PaddleOCR/blob/release/2.7/doc/doc_en/models_list_en.md
+2. Download:
+   - Detection model: en_PP-OCRv3_det
+   - Recognition model: en_PP-OCRv3_rec
+   - Angle classifier (optional): ch_ppocr_mobile_v2.0_cls
+3. Place in ~/.paddleocr/whl/
+
+VERIFICATION:
+-------------
+Test PaddleOCR installation:
+
+```python
+from paddleocr import PaddleOCR
+import numpy as np
+
+# Initialize
+ocr = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False)
+
+# Create test image
+test_image = np.ones((100, 400, 3), dtype=np.uint8) * 255
+
+# Run OCR
+result = ocr.ocr(test_image, cls=True)
+print("PaddleOCR installed successfully!")
+```
+
+INTEGRATION WITH SDK:
+---------------------
+The SDK uses PaddleOCR through wrapper classes:
+- sdk/ocr/detection/paddle_detector.py
+- sdk/ocr/recognition/paddle_recognizer.py
+
+These wrappers:
+1. Initialize PaddleOCR models
+2. Convert between PaddleOCR format and SDK format
+3. Provide consistent interface with other backends
+
+PRODUCTION DEPLOYMENT:
+----------------------
+For production:
+
+1. Pin PaddleOCR version:
+   ```bash
+   cd vendor/PaddleOCR
+   git checkout <specific-commit-hash>
+   ```
+
+2. Freeze dependencies:
+   ```bash
+   pip freeze > requirements_paddle.txt
+   ```
+
+3. Use vendored version:
+   ```python
+   import sys
+   sys.path.insert(0, 'SDK/vendor/PaddleOCR')
+   from paddleocr import PaddleOCR
+   ```
+
+VERSION PINNING:
+----------------
+Recommended versions (tested and stable):
+- PaddleOCR: release/2.7
+- PaddlePaddle: 2.5.0
+- OpenCV: 4.8.0
+
+Lock file (requirements_paddle.txt):
+```
+paddlepaddle==2.5.0
+paddleocr==2.7.0
+opencv-python==4.8.0.76
+Pillow==10.0.0
+```
+
+TROUBLESHOOTING:
+----------------
+
+Error: "ImportError: No module named 'paddle'"
+→ Install: pip install paddlepaddle
+
+Error: "Model file not found"
+→ Run PaddleOCR once to auto-download models
+
+Error: "CUDA error" (GPU)
+→ Install: pip install paddlepaddle-gpu
+→ Verify CUDA installed: nvidia-smi
+
+Error: "Shape mismatch"
+→ Check image format (must be BGR for OpenCV, RGB for PIL)
+
+ALTERNATIVE: USE ONNX VERSIONS
+-------------------------------
+For faster inference and easier deployment:
+1. Export PaddleOCR models to ONNX
+2. Use onnxruntime instead of paddlepaddle
+3. See: https://github.com/PaddlePaddle/PaddleOCR/blob/release/2.7/deploy/paddle2onnx/readme_en.md
+
+NEED HELP?
+----------
+- PaddleOCR Docs: https://github.com/PaddlePaddle/PaddleOCR
+- Issues: https://github.com/PaddlePaddle/PaddleOCR/issues
+- Discord: PaddlePaddle community
+"""
